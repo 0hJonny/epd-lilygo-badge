@@ -1,0 +1,40 @@
+# ============================================================
+# Text handling
+#
+# Everything in this repository is UTF-8: source comments,
+# Japanese UI strings, and documentation. working-tree-encoding
+# is deliberately NOT used - it would re-encode files on checkout
+# and break the build on any platform that expects UTF-8, which
+# is all of them for ESP-IDF.
+#
+# eol=lf keeps line endings consistent so diffs stay readable
+# when contributors work on different operating systems.
+# ============================================================
+* text=auto eol=lf
+
+# Shell scripts must keep LF even on Windows checkouts.
+*.sh text eol=lf
+
+# ============================================================
+# Binary files - Git must never transform these
+# ============================================================
+*.otf binary
+*.ttf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.bin binary
+*.elf binary
+*.zip binary
+*.pdf binary
+
+# ============================================================
+# Generated sources
+#
+# avatar.c is a generated LVGL image array: thousands of lines
+# of hex. Marking it linguist-generated keeps it out of language
+# statistics and collapses it by default in pull request diffs.
+# ============================================================
+main/avatar.c linguist-generated=true

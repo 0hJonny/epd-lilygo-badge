@@ -1,0 +1,121 @@
+#pragma once
+
+#include "driver/i2c.h"
+#include "ui_strings.h"
+
+// ============================================================
+// HARDWARE AND TIMING CONFIGURATION
+//
+// Everything here describes the board or tunes behaviour. Nothing
+// personal lives in this file - see user_profile.h for that.
+// ============================================================
+
+// ------------------------------------------------------------
+// Panel geometry: ED047TC1, fixed by the hardware.
+// ------------------------------------------------------------
+#define PHYS_W 960
+#define PHYS_H 540
+
+// ------------------------------------------------------------
+// Display task
+//
+// The stack is generous because LVGL rendering and the tiny_ttf
+// glyph rasteriser both recurse.
+// ------------------------------------------------------------
+#define DISPLAY_QUEUE_LEN 10
+#define DISPLAY_STACK_SIZE 16384
+
+// ------------------------------------------------------------
+// How many frames between automatic full panel refreshes.
+//
+// epd_clear_area() prepares each region before it is written, but
+// it does not undo cumulative particle drift - faint smears build
+// up over dozens of redraws. A full epd_clear() removes them.
+//
+// Lower values mean a cleaner panel and more flashing. A long press
+// on the rotate button triggers the same refresh manually, so this
+// only needs to catch drift the user has not noticed yet.
+// ------------------------------------------------------------
+#define EINK_GHOST_CLEAR_INTERVAL 40
+
+// ------------------------------------------------------------
+// Link list metrics.
+//
+// If the list overflows or leaves too much empty space on your
+// panel, these are the first numbers to adjust.
+// ------------------------------------------------------------
+#define SOCIAL_ROW_HEIGHT_LANDSCAPE 47
+#define SOCIAL_ROW_HEIGHT_PORTRAIT 45
+#define SOCIAL_ROW_GAP 8
+
+// ============================================================
+// PIN ASSIGNMENT - LILYGO T5-4.7-S3
+// ============================================================
+#define I2C_MASTER_SCL_IO 17
+#define I2C_MASTER_SDA_IO 18
+#define I2C_MASTER_NUM I2C_NUM_0
+
+// GT911 address is selected at reset by the level on the INT pin.
+// If the I2C scanner reports 0x14 instead, change this.
+#define GT911_ADDR 0x5D
+#define TOUCH_INT_PIN 47
+
+// BOOT button. Only wakes the device from deep sleep, which the
+// firmware no longer enters on its own - see power_manager.h.
+#define WAKEUP_BUTTON_PIN 0
+
+// ============================================================
+// BATTERY MEASUREMENT
+//
+// Verify the pin against the schematic for YOUR board revision.
+// On T5-4.7-S3 (V2.3) it is GPIO14, which maps to ADC2 channel 3.
+// Both defines below must change together.
+//
+// ADC2 channel mapping on ESP32-S3:
+//   GPIO11=CH0  GPIO12=CH1  GPIO13=CH2  GPIO14=CH3
+//   GPIO15=CH4  GPIO16=CH5  GPIO17=CH6  GPIO18=CH7
+// ============================================================
+#define BATTERY_ADC_GPIO 14
+#define BATTERY_ADC_CHANNEL ADC2_CHANNEL_3
+
+// The board divides battery voltage by two before the ADC.
+#define BATTERY_DIVIDER_RATIO 2
+
+// Samples averaged per reading, to suppress ADC noise.
+#define BATTERY_ADC_SAMPLES 16
+
+// How often to sample. Each reading costs a wake from light sleep,
+// and e-ink should not be redrawn often anyway, so this is
+// deliberately slow.
+#define BATTERY_POLL_INTERVAL_MS 60000
+
+// Li-Po limits used by the discharge curve.
+#define BATTERY_MV_FULL 4200
+#define BATTERY_MV_EMPTY 3300
+
+// ============================================================
+// AUTOMATIC SLEEP
+// ============================================================
+
+// Inactivity before entering the power-saving loop.
+#define SLEEP_IDLE_TIMEOUT_MS 30000
+
+// Wake interval while sleeping, used to poll the touch controller.
+// This is also the worst-case response latency to a tap. Lower is
+// more responsive but draws more average current; 150 ms is
+// invisible next to the hundreds of milliseconds an e-ink redraw
+// takes.
+#define SLEEP_TOUCH_POLL_MS 150
+
+// Fixed width of the battery label in the status bar.
+//
+// Must fit the longest string ui().battery_fmt can produce, which
+// depends on the interface language: Japanese "電池 100%" needs
+// about 130 px at font size 24, English "Battery 100%" about 170.
+// Too small and the text is clipped; too large and the rotate
+// button drifts toward the centre.
+#if UI_LANG == UI_LANG_EN
+#define STATUS_BATTERY_LABEL_WIDTH 170
+#else
+#define STATUS_BATTERY_LABEL_WIDTH 130
+#endif
