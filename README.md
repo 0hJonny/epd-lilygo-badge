@@ -4,6 +4,12 @@ Digital business card firmware for the LilyGO T5 4.7" S3 e-paper board. Displays
 
 ESP-IDF 4.4.x · LVGL 9.5 · C++17
 
+<p align="center">
+  <img src="assets/badge.jpg" height="300" alt="E-Ink Portrait">
+  &nbsp; &nbsp; &nbsp;
+  <img src="assets/badge_landscape.jpg" width="300" alt="E-Ink Landscape">
+</p>
+
 ---
 
 ## 1. Hardware
@@ -110,12 +116,7 @@ About 12 MB of the 16 MB flash is unallocated. `otadata` is vestigial — there 
 | Upstream | [LilyGo-EPD47](https://github.com/Xinyuan-LilyGO/LilyGo-EPD47), `esp32s3` branch |
 | License  | GPL-3.0                                                                          |
 
-The driver is GPL-3.0, which is copyleft: distributing it inside this
-repository would place the combined work under GPL-3.0 and override the
-MIT license used here. Building and flashing locally is unaffected — the
-obligation attaches to distribution, not compilation.
-
-Upstream ships a ready ESP-IDF component, so setup is a copy:
+The panel driver is kept separate to maintain this repository's MIT license. You will need to download it manually before building:
 
 ```bash
 git clone -b esp32s3 https://github.com/Xinyuan-LilyGO/LilyGo-EPD47.git /tmp/epd47
@@ -124,13 +125,12 @@ git clone -b esp32s3 https://github.com/Xinyuan-LilyGO/LilyGo-EPD47.git /tmp/epd
 # releases, so find it rather than assuming a path
 find /tmp/epd47 -name epd_driver.h
 
-# Copy that directory, plus the license
+# Copy that directory
 mkdir -p components
 cp -r /tmp/epd47/<that-directory> components/epd_driver
 ```
 
-The directory must end up containing `epd_driver.h` and a
-`CMakeLists.txt` reading:
+The directory must end up containing `epd_driver.h` and a `CMakeLists.txt` reading:
 
 ```cmake
 idf_component_register(SRC_DIRS "."
@@ -142,19 +142,13 @@ idf_component_register(SRC_DIRS "."
 
 `main/ui_font_jp.otf` is committed, so the project builds as-is.
 
-Rebuild it only when changing displayed text — see `fonts/README.md`
-for when and how:
+Rebuild it only when changing displayed text (see `fonts/README.md` for details):
 
 ```bash
 cd fonts && python3 build_font.py NotoSansJP-Light.ttf
 ```
 
-The source font is included in `fonts/`, so no download is needed. It is
-unmodified Noto Sans JP Light from
-[Google Fonts](https://fonts.google.com/noto/specimen/Noto+Sans+JP),
-redistributed under [SIL OFL 1.1](fonts/OFL.txt).
-
-Source the input font from [Google Fonts](https://fonts.google.com/noto/specimen/Noto+Sans+JP).
+The source font is included in `fonts/` so no external download is needed. It is an unmodified version of Noto Sans JP Light from Google Fonts, redistributed under the [SIL OFL 1.1](fonts/OFL.txt).
 
 ### 2.5 C++17
 
@@ -179,7 +173,7 @@ Four headers hold everything intended to be edited. No other file needs changing
 | `UserProfile::PHOTO_FRAME`  | `AvatarFrame` | `NONE`, `THIN`, `THICK`, `SQUARE`, `DOUBLE`               |
 | `DEFAULT_URL_*`             | macro         | Guarded with `#ifndef`; overridable from the build system |
 
-Editing `PHOTO_SIGN` or `STATUS_BADGE` requires rebuilding the font subset — see 2.4.
+Editing `PHOTO_SIGN` or `STATUS_BADGE` requires rebuilding the font subset (see 2.4).
 
 No circular frame option. `LV_RADIUS_CIRCLE` makes LVGL rebuild a software corner mask over the whole avatar every frame; at 80 MHz this starves the idle task and trips the task watchdog. For a round avatar, crop the source PNG to a circle with white corners.
 
@@ -345,7 +339,7 @@ Selection callbacks follow `SocialPanel`: a C function pointer plus `void* user_
 
 ### 5.3 Adding a scene
 
-No scene manager exists. `DisplayEngine` owns one `CardScene` directly. For a second scene:
+No scene manager exists. `DisplayEngine` owns one `CardScene directly`. For a second scene:
 
 1. New class alongside `CardScene`, same shape: constructor takes `(parent, ctx)`, exposes `updateLayout(bool is_portrait)`
 2. Add a member to `DisplayEngine`, construct in `buildUI()`
@@ -421,16 +415,14 @@ Then `idf.py fullclean` — stale object files carry the old symbol names, and t
 
 ## 9. Licenses
 
-This repository is [MIT](LICENSE), © 2026 0hJonny.
+This repository is [MIT](LICENSE)
 
 Third-party components carry their own terms:
 
 | Component                                                                   | License                      | Included here                        |
 | --------------------------------------------------------------------------- | ---------------------------- | ------------------------------------ |
-| `main/ui_font_jp.otf`                                                       | [SIL OFL 1.1](fonts/OFL.txt) | Yes, with license                    |
+| `main/ui_font_jp.otf` (subset of Noto Sans JP)                              | [SIL OFL 1.1](fonts/OFL.txt) | Yes, with license                    |
 | LVGL 9.5                                                                    | MIT                          | No, fetched by the component manager |
 | [LilyGo-EPD47](https://github.com/Xinyuan-LilyGO/LilyGo-EPD47) panel driver | GPL-3.0                      | No, obtained separately (see 2.3)    |
 
-The panel driver is deliberately excluded. GPL-3.0 is copyleft: including it here would place the combined work under GPL-3.0 rather than MIT. Anyone distributing a built binary that links against it takes on those obligations themselves.
-
-The font is a subset of Noto Sans JP, itself derived from Adobe Source Han Sans. `fonts/OFL.txt` is reproduced verbatim and must accompany redistribution — details in `fonts/README.md`.
+_Note: The LilyGo panel driver is intentionally excluded from this repository to ensure the main codebase remains strictly under the MIT license._

@@ -1,6 +1,6 @@
 # Font
 
-`main/ui_font_jp.otf` is a subset of Noto Sans JP containing only the glyphs this firmware can render. It is generated, not tracked in git — build it before the first compile.
+`main/ui_font_jp.otf` is a subset of Noto Sans JP containing only the glyphs this firmware can render. It is generated and committed to git for convenience, so the project builds as-is without requiring Python dependencies out of the box. You only need to rebuild it if you change the UI texts.
 
 A character absent from the subset renders as blank space. There is no fallback and no warning, so if a label goes missing on the panel, check here first.
 
@@ -56,7 +56,7 @@ Do not take the font from third-party repositories. Noto CJK shipped under Apach
 
 ## Output naming
 
-Fixed at `ui_font_jp.otf`. The build derives the asm symbols `_binary_ui_font_jp_otf_start` / `_end` from the filename, so renaming means updating `EMBED_FILES` in `main/CMakeLists.txt`, `embedded_assets.h`, `DEFAULT_OUTPUT` in `build_font.py`, and `.gitignore`. Run `idf.py fullclean` afterwards — stale object files carry the old symbol names.
+Fixed at `ui_font_jp.otf`. The build derives the asm symbols `_binary_ui_font_jp_otf_start` / `_end` from the filename, so renaming means updating `EMBED_FILES` in `main/CMakeLists.txt`, `embedded_assets.h`, and `DEFAULT_OUTPUT` in `build_font.py`. Run `idf.py fullclean` afterwards — stale object files carry the old symbol names.
 
 The extension stays `.otf` regardless of source format. If the input is a `.ttf`, the output carries TrueType outlines under an `.otf` name; `tiny_ttf` reads both.
 
