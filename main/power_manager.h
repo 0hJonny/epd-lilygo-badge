@@ -47,3 +47,9 @@ void power_light_sleep_ms(uint32_t duration_ms);
 //
 // Does not return.
 void power_enter_deep_sleep();
+
+// Release GPIO holds applied before deep sleep. Must be called on
+// every boot, before the panel driver initialises: holds survive the
+// wake transition and would block the driver from using its own data
+// bus, leaving the display blank.
+void power_release_panel_pins();

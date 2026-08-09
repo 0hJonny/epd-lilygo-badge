@@ -277,6 +277,8 @@ void DisplayEngine::enterDeepSleep()
 
 void DisplayEngine::loop()
 {
+    power_release_panel_pins();
+
     epd_init();
     epd_poweron();
     epd_poweroff_all();
