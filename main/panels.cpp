@@ -9,6 +9,112 @@
 #include "ui_strings.h"
 
 // ============================================================
+// SHARED AVATAR CONSTRUCTION
+//
+// The avatar is built from two nested containers rather than one.
+//
+// A single object cannot both draw a border and clip its content:
+// clip_corner crops the border along with everything else, and the
+// image on top covers whatever survives. Worse, enabling clip_corner
+// before the widget has a size makes LVGL build its corner mask from
+// a zero-sized rectangle, which recalculates on every frame.
+//
+// So: the outer container owns the border, the inner one owns the
+// clipping, and sizes for both are set later by the caller.
+//
+// Used by both ProfilePanel and SleepPanel.
+// ============================================================
+static void build_avatar(lv_obj_t *parent, lv_obj_t **out_frame,
+                         lv_obj_t **out_clip, lv_obj_t **out_img)
+{
+    lv_obj_t *frame = lv_obj_create(parent);
+    lv_obj_remove_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(frame, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_pad_all(frame, 0, 0);
+    lv_obj_set_style_clip_corner(frame, true, 0);
+    lv_obj_set_style_border_color(frame, lv_color_black(), 0);
+    lv_obj_set_style_outline_color(frame, lv_color_black(), 0);
+
+    lv_obj_t *clip = lv_obj_create(frame);
+    lv_obj_remove_flag(clip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(clip, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_pad_all(clip, 0, 0);
+    lv_obj_set_style_border_width(clip, 0, 0);
+    lv_obj_center(clip);
+
+    switch (UserProfile::PHOTO_FRAME)
+    {
+    case UserProfile::AvatarFrame::NONE:
+        lv_obj_set_style_border_width(frame, 0, 0);
+        lv_obj_set_style_radius(frame, 16, 0);
+        lv_obj_set_style_radius(clip, 16, 0);
+        break;
+
+    case UserProfile::AvatarFrame::THIN:
+        lv_obj_set_style_border_width(frame, 2, 0);
+        lv_obj_set_style_radius(frame, 16, 0);
+        lv_obj_set_style_radius(clip, 14, 0);
+        break;
+
+    case UserProfile::AvatarFrame::THICK:
+        lv_obj_set_style_border_width(frame, 6, 0);
+        lv_obj_set_style_radius(frame, 16, 0);
+        lv_obj_set_style_radius(clip, 10, 0);
+        break;
+
+    case UserProfile::AvatarFrame::SQUARE:
+        lv_obj_set_style_border_width(frame, 3, 0);
+        lv_obj_set_style_radius(frame, 0, 0);
+        lv_obj_set_style_radius(clip, 0, 0);
+        break;
+
+    case UserProfile::AvatarFrame::DOUBLE:
+        lv_obj_set_style_border_width(frame, 2, 0);
+        lv_obj_set_style_radius(frame, 16, 0);
+        lv_obj_set_style_radius(clip, 14, 0);
+        lv_obj_set_style_outline_width(frame, 2, 0);
+        // The gap is what makes this read as two frames rather than
+        // one thick line. The outline draws outside the widget
+        // bounds, so the flex parent needs room for it.
+        lv_obj_set_style_outline_pad(frame, 4, 0);
+        lv_obj_set_style_margin_all(frame, 8, 0);
+        break;
+    }
+
+    lv_obj_t *img = lv_image_create(clip);
+    lv_image_set_src(img, &avatar);
+    lv_obj_center(img);
+
+    *out_frame = frame;
+    *out_clip = clip;
+    *out_img = img;
+}
+
+// Resize an avatar built by build_avatar. The clipping container has
+// to shrink by twice the border width, or the image covers the frame
+// from the inside and the border disappears.
+static void size_avatar(lv_obj_t *frame, lv_obj_t *clip, lv_obj_t *img,
+                        int32_t size)
+{
+    lv_obj_set_size(frame, size, size);
+
+    int32_t border = lv_obj_get_style_border_width(frame, LV_PART_MAIN);
+    int32_t inner = size - border * 2;
+    lv_obj_set_size(clip, inner, inner);
+
+    // Enable clipping only now that a real size exists. Doing it at
+    // construction makes LVGL compute the corner mask from a
+    // zero-sized rectangle and recalculate it every frame.
+    lv_obj_set_style_clip_corner(clip, true, 0);
+
+    // Scale factor is fixed-point with 256 meaning 1.0. Deriving it
+    // from the source width means any square avatar resolution works
+    // without touching this code.
+    int32_t scale = (inner * 256) / avatar.header.w;
+    lv_image_set_scale(img, scale);
+}
+
+// ============================================================
 // PROFILE PANEL
 // ============================================================
 ProfilePanel::ProfilePanel(lv_obj_t *parent, UIContext *ctx) : BaseComponent(ctx)
@@ -22,78 +128,7 @@ ProfilePanel::ProfilePanel(lv_obj_t *parent, UIContext *ctx) : BaseComponent(ctx
     lv_obj_set_flex_flow(m_root, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(m_root, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // The avatar is built from two nested containers rather than one.
-    //
-    // A single object cannot both draw a border and clip its content:
-    // clip_corner crops the border along with everything else, and
-    // the image on top covers whatever survives. Worse, enabling
-    // clip_corner before the widget has a size makes LVGL build its
-    // corner mask from a zero-sized rectangle, and with
-    // LV_RADIUS_CIRCLE that recalculation loops on every frame -
-    // enough to starve the idle task and trip the watchdog.
-    //
-    // So: the outer container owns the border, the inner one owns the
-    // clipping, and sizes for both are set later in updateSize().
-    m_avatar = lv_obj_create(m_root);
-    lv_obj_remove_flag(m_avatar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(m_avatar, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_pad_all(m_avatar, 0, 0);
-    lv_obj_set_style_bg_opa(m_avatar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_color(m_avatar, lv_color_black(), 0);
-    lv_obj_set_style_outline_color(m_avatar, lv_color_black(), 0);
-
-    m_avatar_clip = lv_obj_create(m_avatar);
-    lv_obj_remove_flag(m_avatar_clip, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(m_avatar_clip, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_pad_all(m_avatar_clip, 0, 0);
-    lv_obj_set_style_border_width(m_avatar_clip, 0, 0);
-    lv_obj_center(m_avatar_clip);
-
-    // Frame style is chosen by the badge owner in user_profile.h.
-    // Everything here is expressible with plain LVGL styles: no extra
-    // image assets, no alpha channel, no changes to the flush path.
-    switch (UserProfile::PHOTO_FRAME)
-    {
-    case UserProfile::AvatarFrame::NONE:
-        lv_obj_set_style_border_width(m_avatar, 0, 0);
-        lv_obj_set_style_radius(m_avatar, 16, 0);
-        lv_obj_set_style_radius(m_avatar_clip, 16, 0);
-        break;
-
-    case UserProfile::AvatarFrame::THIN:
-        lv_obj_set_style_border_width(m_avatar, 2, 0);
-        lv_obj_set_style_radius(m_avatar, 16, 0);
-        lv_obj_set_style_radius(m_avatar_clip, 14, 0);
-        break;
-
-    case UserProfile::AvatarFrame::THICK:
-        lv_obj_set_style_border_width(m_avatar, 6, 0);
-        lv_obj_set_style_radius(m_avatar, 16, 0);
-        lv_obj_set_style_radius(m_avatar_clip, 10, 0);
-        break;
-
-    case UserProfile::AvatarFrame::SQUARE:
-        lv_obj_set_style_border_width(m_avatar, 3, 0);
-        lv_obj_set_style_radius(m_avatar, 0, 0);
-        lv_obj_set_style_radius(m_avatar_clip, 0, 0);
-        break;
-
-    case UserProfile::AvatarFrame::DOUBLE:
-        lv_obj_set_style_border_width(m_avatar, 2, 0);
-        lv_obj_set_style_radius(m_avatar, 16, 0);
-        lv_obj_set_style_radius(m_avatar_clip, 14, 0);
-        lv_obj_set_style_outline_width(m_avatar, 2, 0);
-        // The gap is what makes this read as two frames rather than
-        // one thick line. The outline draws outside the widget
-        // bounds, so the flex parent needs room for it.
-        lv_obj_set_style_outline_pad(m_avatar, 4, 0);
-        lv_obj_set_style_margin_all(m_avatar, 8, 0);
-        break;
-    }
-
-    m_img_widget = lv_image_create(m_avatar_clip);
-    lv_image_set_src(m_img_widget, &avatar);
-    lv_obj_center(m_img_widget);
+    build_avatar(m_root, &m_avatar, &m_avatar_clip, &m_img_widget);
 
     m_name_label = new Label(m_root, ctx, UserProfile::PHOTO_SIGN, ctx->font_24);
     lv_obj_set_style_margin_top(m_name_label->getRoot(), 15, 0);
@@ -106,26 +141,7 @@ ProfilePanel::~ProfilePanel()
 
 void ProfilePanel::updateSize(bool is_portrait)
 {
-    int32_t avatar_size = is_portrait ? 200 : 240;
-    lv_obj_set_size(m_avatar, avatar_size, avatar_size);
-
-    // The clipping container sits inside the border, so it has to be
-    // smaller by twice the border width - otherwise the image covers
-    // the frame from the inside and the border disappears.
-    int32_t border = lv_obj_get_style_border_width(m_avatar, LV_PART_MAIN);
-    int32_t inner_size = avatar_size - border * 2;
-    lv_obj_set_size(m_avatar_clip, inner_size, inner_size);
-
-    // Enable clipping only now that a real size exists. Doing it in
-    // the constructor makes LVGL compute the corner mask from a
-    // zero-sized rectangle and recalculate it every frame.
-    lv_obj_set_style_clip_corner(m_avatar_clip, true, 0);
-
-    // Scale factor is fixed-point with 256 meaning 1.0. Deriving it
-    // from the source width means any square avatar resolution works
-    // without touching this code.
-    int32_t scale = (inner_size * 256) / avatar.header.w;
-    lv_image_set_scale(m_img_widget, scale);
+    size_avatar(m_avatar, m_avatar_clip, m_img_widget, is_portrait ? 200 : 240);
 }
 
 // ============================================================
@@ -384,3 +400,81 @@ void CardScene::updateLayout(bool is_portrait)
 }
 
 void CardScene::selectSocialByIndex(int idx) { m_social->selectIndex(idx); }
+
+// ============================================================
+// SLEEP PANEL
+// ============================================================
+SleepPanel::SleepPanel(lv_obj_t *parent, UIContext *ctx) : BaseComponent(ctx)
+{
+    m_root = lv_obj_create(parent);
+    lv_obj_remove_flag(m_root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(m_root, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(m_root, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_border_width(m_root, 0, 0);
+    lv_obj_set_style_pad_all(m_root, 10, 0);
+    lv_obj_set_style_bg_color(m_root, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(m_root, LV_OPA_COVER, 0);
+
+    lv_obj_set_layout(m_root, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(m_root, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(m_root, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Avatar and QR live in a nested container so the hint can sit
+    // pinned at the bottom while these two stay centred together.
+    m_content = lv_obj_create(m_root);
+    lv_obj_remove_flag(m_content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(m_content, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_width(m_content, LV_PCT(100));
+    lv_obj_set_flex_grow(m_content, 1);
+    lv_obj_set_style_border_width(m_content, 0, 0);
+    lv_obj_set_style_pad_all(m_content, 0, 0);
+    lv_obj_set_layout(m_content, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_align(m_content, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    build_avatar(m_content, &m_avatar, &m_avatar_clip, &m_img_widget);
+
+    m_qr = new QRCodePrimitive(m_content, ctx, 200);
+
+    m_sign = new Label(m_root, ctx, UserProfile::SLEEP_SIGN, ctx->font_24);
+    lv_obj_set_style_margin_top(m_sign->getRoot(), 12, 0);
+
+    m_hint = new Label(m_root, ctx, ui().sleep_hint, ctx->font_24);
+    lv_obj_set_style_margin_top(m_hint->getRoot(), 8, 0);
+
+    // The QR is fixed for the lifetime of the panel: which link it
+    // encodes is a build-time choice, not a runtime one.
+    constexpr int idx = UserProfile::SLEEP_LINK_INDEX;
+    static_assert(idx >= 0 && idx < SOCIAL_LINKS_COUNT,
+                  "UserProfile::SLEEP_LINK_INDEX is out of range for SOCIAL_LINKS");
+    m_qr->setData(SOCIAL_LINKS[idx].url);
+
+    // Hidden until the badge is actually going to sleep.
+    lv_obj_add_flag(m_root, LV_OBJ_FLAG_HIDDEN);
+}
+
+SleepPanel::~SleepPanel()
+{
+    delete m_qr;
+    delete m_sign;
+    delete m_hint;
+}
+
+void SleepPanel::updateLayout(bool is_portrait)
+{
+    // Portrait stacks avatar over QR; landscape places them side by
+    // side, where vertical space is the scarce dimension.
+    lv_obj_set_flex_flow(m_content, is_portrait ? LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW);
+
+    if (is_portrait)
+    {
+        lv_obj_set_style_pad_row(m_content, 30, 0);
+        size_avatar(m_avatar, m_avatar_clip, m_img_widget, 180);
+        m_qr->setSize(220);
+    }
+    else
+    {
+        lv_obj_set_style_pad_column(m_content, 50, 0);
+        size_avatar(m_avatar, m_avatar_clip, m_img_widget, 200);
+        m_qr->setSize(240);
+    }
+}

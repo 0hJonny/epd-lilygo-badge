@@ -11,7 +11,7 @@
 class ProfilePanel : public BaseComponent
 {
 private:
-    lv_obj_t *m_avatar;      // frame container: border only, no clipping
+    lv_obj_t *m_avatar;      // frame container: border only
     lv_obj_t *m_avatar_clip; // inner container: clips the image
     lv_obj_t *m_img_widget;
     Label *m_name_label;
@@ -77,14 +77,6 @@ public:
 
 // ============================================================
 // CARD SCENE - the three panels and their layout
-//
-// The bottom ControlMenu strip that used to sit below these panels
-// is gone: its rotate button moved into the status bar and its
-// sleep button was removed entirely. Sleep now happens on an
-// inactivity timeout, so a manual button did nothing the firmware
-// would not do by itself thirty seconds later.
-//
-// Layout flips between a row (landscape) and a column (portrait).
 // ============================================================
 class CardScene : public BaseComponent
 {
@@ -102,4 +94,32 @@ public:
     void loadCustomLink(const char *url);
     void updateLayout(bool is_portrait);
     void selectSocialByIndex(int idx);
+};
+
+// ============================================================
+// SLEEP PANEL
+//
+// Shown full-screen before entering deep sleep, and left on the
+// panel afterwards - e-ink retains the image with no power.
+//
+// It carries the avatar and one QR code rather than a bare "off"
+// message, so a switched-off badge still works as a business card.
+// Which link it encodes is set by UserProfile::SLEEP_LINK_INDEX.
+// ============================================================
+class SleepPanel : public BaseComponent
+{
+private:
+    lv_obj_t *m_content;
+    lv_obj_t *m_avatar;
+    lv_obj_t *m_avatar_clip;
+    lv_obj_t *m_img_widget;
+    QRCodePrimitive *m_qr;
+    Label *m_sign;
+    Label *m_hint;
+
+public:
+    SleepPanel(lv_obj_t *parent, UIContext *ctx);
+    ~SleepPanel();
+
+    void updateLayout(bool is_portrait);
 };

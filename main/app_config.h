@@ -119,3 +119,53 @@
 #else
 #define STATUS_BATTERY_LABEL_WIDTH 130
 #endif
+
+// ------------------------------------------------------------
+// Manual deep sleep button
+//
+// IO21 rather than IO00: the latter is a strapping pin, and holding
+// it low across a reset can drop the chip into download mode instead
+// of running the firmware. Deep sleep wakeup goes through a reset,
+// so that risk is real.
+//
+// IO21 also sits inside the RTC domain (GPIO0-21), which is a hard
+// requirement for EXT1 wakeup. The touch controller on IO47 does not,
+// which is why touch cannot wake the device from deep sleep.
+//
+// Verified active-low on rev V2.4: the button pulls to ground and an
+// internal pull-up holds the idle state high.
+// ------------------------------------------------------------
+#define SLEEP_BUTTON_PIN 21
+
+// How long the button must be held before deep sleep is triggered.
+// Long enough that a stray press while handling the badge does not
+// switch it off mid-conversation.
+#define SLEEP_BUTTON_HOLD_MS 2000
+
+// ============================================================
+// RENDER MODE
+//
+// PARTIAL redraws only the regions LVGL marked dirty. That is what
+// this firmware is tuned for: tapping a link repaints two list rows
+// and the QR, not the whole screen.
+//
+// FULL renders the entire 960x540 frame on every change. Slower and
+// heavier on the panel, but immune to any partial-update artefact -
+// worth switching to if regional refresh looks wrong on your unit.
+//
+// Note the interaction with EINK_GHOST_CLEAR_INTERVAL below: in FULL
+// mode every frame is already a full frame, so the periodic
+// whole-screen clear is skipped and the counter is unused.
+// ============================================================
+#define RENDER_MODE_PARTIAL 1
+#define RENDER_MODE_FULL 2
+
+#ifndef RENDER_MODE
+#define RENDER_MODE RENDER_MODE_PARTIAL
+#endif
+
+#if RENDER_MODE == RENDER_MODE_FULL
+#define LV_RENDER_MODE LV_DISPLAY_RENDER_MODE_FULL
+#else
+#define LV_RENDER_MODE LV_DISPLAY_RENDER_MODE_PARTIAL
+#endif

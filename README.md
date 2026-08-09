@@ -208,16 +208,17 @@ Rows can be added or removed freely. Above ~8 entries the list overflows in land
 
 ### 3.4 `main/app_config.h` — hardware and timing
 
-| Symbol                       | Default   | Effect                                       |
-| ---------------------------- | --------- | -------------------------------------------- |
-| `EINK_GHOST_CLEAR_INTERVAL`  | 40        | Frames between automatic full refreshes      |
-| `SLEEP_IDLE_TIMEOUT_MS`      | 30000     | Inactivity before entering the sleep loop    |
-| `SLEEP_TOUCH_POLL_MS`        | 150       | Wake interval; also worst-case touch latency |
-| `BATTERY_POLL_INTERVAL_MS`   | 60000     | ADC sampling period                          |
-| `BATTERY_ADC_SAMPLES`        | 16        | Samples averaged per reading                 |
-| `SOCIAL_ROW_HEIGHT_*`        | 45 / 47   | Link row height, portrait / landscape        |
-| `SOCIAL_ROW_GAP`             | 8         | Gap between rows                             |
-| `STATUS_BATTERY_LABEL_WIDTH` | 130 / 170 | Fixed label width, per `UI_LANG`             |
+| Symbol                       | Default               | Effect                                                                                |
+| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------- |
+| `EINK_GHOST_CLEAR_INTERVAL`  | 40                    | Frames between automatic full refreshes                                               |
+| `SLEEP_IDLE_TIMEOUT_MS`      | 30000                 | Inactivity before entering the sleep loop                                             |
+| `SLEEP_TOUCH_POLL_MS`        | 150                   | Wake interval; also worst-case touch latency                                          |
+| `BATTERY_POLL_INTERVAL_MS`   | 60000                 | ADC sampling period                                                                   |
+| `BATTERY_ADC_SAMPLES`        | 16                    | Samples averaged per reading                                                          |
+| `SOCIAL_ROW_HEIGHT_*`        | 45 / 47               | Link row height, portrait / landscape                                                 |
+| `SOCIAL_ROW_GAP`             | 8                     | Gap between rows                                                                      |
+| `STATUS_BATTERY_LABEL_WIDTH` | 130 / 170             | Fixed label width, per `UI_LANG`                                                      |
+| `RENDER_MODE`                | `RENDER_MODE_PARTIAL` | `PARTIAL` redraws dirty regions only; `FULL` repaints the whole panel on every change |
 
 ---
 

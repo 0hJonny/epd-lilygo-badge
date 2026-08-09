@@ -244,6 +244,7 @@ void epd_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         s_frame_in_progress = false;
         s_frame_pre_cleared = false;
 
+#if RENDER_MODE == RENDER_MODE_PARTIAL
         if (++s_updates_since_clear >= EINK_GHOST_CLEAR_INTERVAL)
         {
             // Request only - the clear itself happens before the next
@@ -252,6 +253,7 @@ void epd_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
                      (unsigned long)s_updates_since_clear);
             graphics_core_request_full_refresh();
         }
+#endif
         epd_poweroff_all();
     }
     lv_display_flush_ready(disp);

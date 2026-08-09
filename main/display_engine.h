@@ -29,6 +29,7 @@ private:
     lv_obj_t *m_screen_root;
     StatusBar *m_statusbar;
     CardScene *m_card_scene;
+    SleepPanel *m_sleep_panel;
 
     esp_timer_handle_t m_battery_timer;
 
@@ -36,12 +37,24 @@ private:
     // interleaved with touch polling.
     bool m_is_idle;
 
+    // Timestamp of the moment the sleep button went down, or 0 while
+    // it is up. Used to measure the hold duration.
+    int64_t m_button_down_us;
+
     void initLvgl();
     void buildUI();
     void applyOrientation();
 
     void startBatteryTimer();
     static void batteryTimerCb(void *arg);
+
+    // Poll the sleep button and trigger shutdown once held long
+    // enough.
+    void checkSleepButton();
+
+    // Render the sleep screen, wait for the flush to finish, then
+    // power down. Does not return.
+    void enterDeepSleep();
 
 public:
     DisplayEngine(QueueHandle_t q);

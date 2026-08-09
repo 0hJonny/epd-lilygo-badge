@@ -29,7 +29,8 @@ static const char *TAG = "DISPLAY_ENGINE";
 DisplayEngine::DisplayEngine(QueueHandle_t q)
     : m_queue(q), m_disp(nullptr), m_indev(nullptr),
       m_screen_root(nullptr), m_statusbar(nullptr), m_card_scene(nullptr),
-      m_battery_timer(nullptr), m_is_idle(false) {}
+      m_sleep_panel(nullptr), m_battery_timer(nullptr), m_is_idle(false),
+      m_button_down_us(0) {}
 
 void DisplayEngine::initLvgl()
 {
@@ -57,7 +58,12 @@ void DisplayEngine::initLvgl()
         abort();
     }
 
-    lv_display_set_buffers(m_disp, buf1, nullptr, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(m_disp, buf1, nullptr, buf_size, LV_RENDER_MODE);
+#if RENDER_MODE == RENDER_MODE_FULL
+    ESP_LOGI(TAG, "Render mode: FULL - every change repaints the whole panel");
+#else
+    ESP_LOGI(TAG, "Render mode: PARTIAL");
+#endif
     lv_display_set_flush_cb(m_disp, epd_flush_cb);
     lv_display_add_event_cb(m_disp, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
@@ -100,6 +106,10 @@ void DisplayEngine::buildUI()
     m_card_scene = new CardScene(m_screen_root, &m_ctx);
     m_card_scene->selectSocialByIndex(g_selected_social_index);
 
+    // Created hidden. Sits alongside the card rather than inside it,
+    // so it can cover the status bar too.
+    m_sleep_panel = new SleepPanel(m_screen_root, &m_ctx);
+
     applyOrientation();
     ESP_LOGI(TAG, "UI built");
 }
@@ -115,6 +125,11 @@ void DisplayEngine::applyOrientation()
     lv_display_set_rotation(m_disp, to_lv_rotation(g_rotation));
 
     m_card_scene->updateLayout(is_portrait);
+
+    // The sleep panel is hidden but still has to track orientation:
+    // it is rendered on the way into deep sleep, with no chance to
+    // lay out afterwards.
+    m_sleep_panel->updateLayout(is_portrait);
 
     // The whole frame changes, so invalidate unconditionally.
     lv_obj_invalidate(m_screen_root);
@@ -138,10 +153,10 @@ void DisplayEngine::batteryTimerCb(void *arg)
 
     uint8_t percent = battery_mv_to_percent(mv);
 
-    // Skip the redraw when nothing changed. A repaint costs a panel
-    // refresh and pushes the ghost-clear counter along, so sending
-    // an identical value once a minute would flash the screen for
-    // no reason. Static so it survives across timer callbacks.
+    // Skip the update when nothing changed. A repaint costs a panel
+    // refresh and advances the ghost-clear counter, so posting an
+    // identical value once a minute would eventually make an idle
+    // badge flash on its own. 0xFF is a value percent never takes.
     static uint8_t s_last_percent = 0xFF;
     if (percent == s_last_percent)
         return;
@@ -193,11 +208,89 @@ void DisplayEngine::startBatteryTimer()
     batteryTimerCb(this);
 }
 
+// ============================================================
+// SLEEP BUTTON
+//
+// Polled from the main loop rather than driven by an interrupt: the
+// loop already runs at least every 150 ms, which is far finer than
+// the multi-second hold this measures.
+// ============================================================
+void DisplayEngine::checkSleepButton()
+{
+    bool pressed = power_button_pressed();
+    int64_t now = esp_timer_get_time();
+
+    if (!pressed)
+    {
+        m_button_down_us = 0;
+        return;
+    }
+
+    if (m_button_down_us == 0)
+    {
+        m_button_down_us = now;
+        ESP_LOGI(TAG, "Sleep button down");
+        return;
+    }
+
+    if ((now - m_button_down_us) >= (int64_t)SLEEP_BUTTON_HOLD_MS * 1000)
+    {
+        ESP_LOGI(TAG, "Sleep button held, shutting down");
+        enterDeepSleep();
+    }
+}
+
+void DisplayEngine::enterDeepSleep()
+{
+    // Leaving the idle state first: the sleep screen has to render,
+    // and the full-refresh path is skipped while idle.
+    m_is_idle = false;
+
+    m_card_scene->setVisible(false);
+    m_statusbar->setVisible(false);
+    m_sleep_panel->setVisible(true);
+
+    // The sleep screen replaces everything. Without a full refresh,
+    // fragments of the card would show through and the badge would
+    // look broken rather than switched off.
+    graphics_core_request_full_refresh();
+    lv_obj_invalidate(m_screen_root);
+
+    // Drive rendering to completion before cutting power. One
+    // lv_timer_handler call does not flush the whole invalidated
+    // area, and a half-drawn frame is what stays on the panel.
+    for (int i = 0; i < 15; i++)
+    {
+        uint32_t current_time = esp_timer_get_time() / 1000;
+        lv_tick_inc(50);
+        lv_timer_handler();
+        (void)current_time;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    // Do not sleep with the button still down - the wake source is
+    // level-triggered and would fire immediately.
+    power_wait_button_release();
+
+    power_enter_deep_sleep();
+}
+
 void DisplayEngine::loop()
 {
     epd_init();
     epd_poweron();
     epd_poweroff_all();
+
+    power_button_init();
+
+    // Woken by the button: it is still held right now. Waiting here
+    // avoids the press being counted as a fresh shutdown request the
+    // moment the loop starts polling.
+    if (power_woke_from_button())
+    {
+        ESP_LOGI(TAG, "Woke from deep sleep via button");
+        power_wait_button_release();
+    }
 
     initLvgl();
     buildUI();
@@ -211,6 +304,9 @@ void DisplayEngine::loop()
         lv_tick_inc(current_time - last_tick_time);
         last_tick_time = current_time;
 
+        checkSleepButton();
+
+#if RENDER_MODE == RENDER_MODE_PARTIAL
         // The driver has asked for a full refresh - invalidate the
         // ENTIRE screen before handing control to LVGL.
         //
@@ -222,10 +318,15 @@ void DisplayEngine::loop()
         // vanishes until the next full update.
         //
         // Skipped while asleep: nobody is looking.
+        //
+        // Not needed in FULL mode: every frame already covers the
+        // whole screen, so particle drift never accumulates
+        // unevenly.
         if (!m_is_idle && graphics_core_is_full_refresh_pending())
         {
             lv_obj_invalidate(m_screen_root);
         }
+#endif
 
         uint32_t wait_ms = lv_timer_handler();
         wait_ms = std::max((uint32_t)5, std::min(wait_ms, (uint32_t)100));
@@ -267,18 +368,24 @@ void DisplayEngine::loop()
             case CommandType::UPDATE_BATTERY:
                 // Not repainted while asleep: a redraw costs more
                 // than the reading itself and nobody is watching.
-                // The value is picked up at the next sample after
-                // waking.
                 if (event.payload && !m_is_idle)
                     m_statusbar->setBattery(event.payload);
                 break;
 
             case CommandType::FULL_REFRESH:
-                // Long press on the rotate button. The flag is
-                // consumed at the top of the next iteration, which
-                // is where the full-screen invalidation happens.
+                // Long press on the rotate button.
                 ESP_LOGI(TAG, "Command: FULL_REFRESH");
+#if RENDER_MODE == RENDER_MODE_PARTIAL
+                // The flag is consumed at the top of the next
+                // iteration, which is where the full-screen
+                // invalidation happens.
                 graphics_core_request_full_refresh();
+#else
+                // In FULL mode there is nothing to accumulate, but
+                // the gesture should still do something visible -
+                // repaint on demand.
+                lv_obj_invalidate(m_screen_root);
+#endif
                 break;
             }
             if (event.payload)

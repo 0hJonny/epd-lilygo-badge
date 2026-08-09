@@ -46,6 +46,9 @@ struct UiStrings
     // Caption used when a QR code is loaded from an external
     // command rather than from the link list.
     const char *custom_link;
+
+    // Hint on the sleep screen for how to switch the badge back on.
+    const char *sleep_hint;
 };
 
 inline constexpr UiStrings UI_STRINGS_JA = {
@@ -53,6 +56,7 @@ inline constexpr UiStrings UI_STRINGS_JA = {
     "電池 --%",
     "%s のQR",
     "カスタムリンク",
+    "ボタンで起動",
 };
 
 inline constexpr UiStrings UI_STRINGS_EN = {
@@ -60,6 +64,7 @@ inline constexpr UiStrings UI_STRINGS_EN = {
     "Battery --%",
     "%s QR",
     "Custom link",
+    "Press button to wake",
 };
 
 // Adding a language: define UI_STRINGS_XX above with every field
