@@ -1,6 +1,6 @@
 # E-Ink Business Card
 
-Digital business card firmware for the LilyGO T5 4.7" S3 e-paper board. Displays an avatar, a QR code, and a touch-selectable link list. Battery powered, sleeps on inactivity, wakes on touch.
+Digital business card firmware for the LilyGO T5 4.7" S3 e-paper board. Displays an avatar, a QR code, and a touch-selectable link list. Battery powered, sleeps on inactivity, wakes on touch, and can be switched off entirely with a button.
 
 ESP-IDF 4.4.x · LVGL 9.5 · C++17
 
@@ -21,20 +21,22 @@ ESP-IDF 4.4.x · LVGL 9.5 · C++17
 | Flash / PSRAM | 16 MB / 8 MB octal                            |
 | Panel         | ED047TC1, 960×540, 16 grayscale levels        |
 | Touch         | GT911, 2-point, I2C 0x5D                      |
-| RTC           | PCF8563, I2C 0x51 (unused)                    |
+| RTC           | PCF8563, I2C 0x51 (CLKOUT disabled, see 3.4)  |
 | Battery       | Li-Po, JST-PH 2.0                             |
 
 ### 1.1 Pin map
 
 Used by this firmware:
 
-| Pin  | Function                           | Defined in          |
-| ---- | ---------------------------------- | ------------------- |
-| IO17 | I2C SCL                            | `I2C_MASTER_SCL_IO` |
-| IO18 | I2C SDA                            | `I2C_MASTER_SDA_IO` |
-| IO47 | GT911 INT (address latch only)     | `TOUCH_INT_PIN`     |
-| IO14 | Battery ADC, 1:2 divider, ADC2_CH3 | `BATTERY_ADC_GPIO`  |
-| IO00 | BOOT button                        | `WAKEUP_BUTTON_PIN` |
+| Pin  | Function                                 | Defined in          |
+| ---- | ---------------------------------------- | ------------------- |
+| IO17 | I2C SCL                                  | `I2C_MASTER_SCL_IO` |
+| IO18 | I2C SDA                                  | `I2C_MASTER_SDA_IO` |
+| IO47 | GT911 INT — address latch and sleep hold | `TOUCH_INT_PIN`     |
+| IO14 | Battery ADC, 1:2 divider, ADC2_CH3       | `BATTERY_ADC_GPIO`  |
+| IO21 | Sleep button                             | `SLEEP_BUTTON_PIN`  |
+
+IO21 rather than IO00 for the button: IO00 is a strapping pin, and holding it low across a reset can drop the chip into download mode. Deep sleep wakeup goes through a reset, so that risk is real. IO21 also sits inside the RTC domain (GPIO0–21), a hard requirement for EXT1 wakeup.
 
 Occupied by the board, not available:
 
@@ -44,7 +46,7 @@ Occupied by the board, not available:
 | IO45, IO48             | Panel STV / LE                  |
 | IO11, IO15, IO16, IO42 | TF card SCLK / MOSI / MISO / CS |
 | IO09                   | PCF8563 interrupt               |
-| IO21, RST              | Buttons                         |
+| IO00, RST              | BOOT and reset buttons          |
 | IO19, IO20             | USB D-/D+                       |
 
 ADC2 channel mapping on ESP32-S3, for relocating the battery sense pin:
@@ -166,14 +168,18 @@ Four headers hold everything intended to be edited. No other file needs changing
 
 ### 3.1 `main/user_profile.h` — owner content
 
-| Symbol                      | Type          | Notes                                                     |
-| --------------------------- | ------------- | --------------------------------------------------------- |
-| `UserProfile::PHOTO_SIGN`   | `const char*` | Avatar caption. Wraps to a second line if long            |
-| `UserProfile::STATUS_BADGE` | `const char*` | Status bar chip, 40×40 px. 1–2 characters                 |
-| `UserProfile::PHOTO_FRAME`  | `AvatarFrame` | `NONE`, `THIN`, `THICK`, `SQUARE`, `DOUBLE`               |
-| `DEFAULT_URL_*`             | macro         | Guarded with `#ifndef`; overridable from the build system |
+| Symbol                          | Type          | Notes                                                     |
+| ------------------------------- | ------------- | --------------------------------------------------------- |
+| `UserProfile::PHOTO_SIGN`       | `const char*` | Avatar caption on the main screen                         |
+| `UserProfile::STATUS_BADGE`     | `const char*` | Status bar chip, 40×40 px. 1–2 characters                 |
+| `UserProfile::SLEEP_SIGN`       | `const char*` | Caption on the sleep screen, under the QR code            |
+| `UserProfile::SLEEP_LINK_INDEX` | `int`         | Which `SOCIAL_LINKS` entry the sleep screen encodes       |
+| `UserProfile::PHOTO_FRAME`      | `AvatarFrame` | `NONE`, `THIN`, `THICK`, `SQUARE`, `DOUBLE`               |
+| `DEFAULT_URL_*`                 | macro         | Guarded with `#ifndef`; overridable from the build system |
 
-Editing `PHOTO_SIGN` or `STATUS_BADGE` requires rebuilding the font subset (see 2.4).
+Editing any of the text values requires rebuilding the font subset (see 2.4).
+
+`SLEEP_LINK_INDEX` is validated with `static_assert`, so an out-of-range value is a compile error rather than a blank QR.
 
 No circular frame option. `LV_RADIUS_CIRCLE` makes LVGL rebuild a software corner mask over the whole avatar every frame; at 80 MHz this starves the idle task and trips the task watchdog. For a round avatar, crop the source PNG to a circle with white corners.
 
@@ -189,6 +195,7 @@ Fields in `UiStrings`:
 | `battery_unknown` | placeholder before first ADC read |
 | `qr_caption_fmt`  | one `%s` — link label             |
 | `custom_link`     | caption for `LOAD_SCENE_PROFILE`  |
+| `sleep_hint`      | how to wake the badge             |
 
 Adding a language: define `UI_STRINGS_XX` with every field, add a branch in `ui()`, rebuild the font subset. The struct has no defaults, so omissions are compile errors.
 
@@ -211,14 +218,19 @@ Rows can be added or removed freely. Above ~8 entries the list overflows in land
 | Symbol                       | Default               | Effect                                                                                |
 | ---------------------------- | --------------------- | ------------------------------------------------------------------------------------- |
 | `EINK_GHOST_CLEAR_INTERVAL`  | 40                    | Frames between automatic full refreshes                                               |
-| `SLEEP_IDLE_TIMEOUT_MS`      | 30000                 | Inactivity before entering the sleep loop                                             |
+| `SLEEP_IDLE_TIMEOUT_MS`      | 30000                 | Inactivity before entering the light-sleep loop                                       |
 | `SLEEP_TOUCH_POLL_MS`        | 150                   | Wake interval; also worst-case touch latency                                          |
+| `SLEEP_BUTTON_HOLD_MS`       | 2000                  | How long IO21 must be held to switch the badge off                                    |
 | `BATTERY_POLL_INTERVAL_MS`   | 60000                 | ADC sampling period                                                                   |
 | `BATTERY_ADC_SAMPLES`        | 16                    | Samples averaged per reading                                                          |
+| `BATTERY_CRITICAL_PERCENT`   | 5                     | Force deep sleep below this charge. `0` disables the protection                       |
+| `RTC_DISABLE_CLKOUT`         | 1                     | Switch off the PCF8563 32 kHz output at boot. `0` leaves the RTC untouched            |
 | `SOCIAL_ROW_HEIGHT_*`        | 45 / 47               | Link row height, portrait / landscape                                                 |
 | `SOCIAL_ROW_GAP`             | 8                     | Gap between rows                                                                      |
 | `STATUS_BATTERY_LABEL_WIDTH` | 130 / 170             | Fixed label width, per `UI_LANG`                                                      |
 | `RENDER_MODE`                | `RENDER_MODE_PARTIAL` | `PARTIAL` redraws dirty regions only; `FULL` repaints the whole panel on every change |
+
+`RTC_DISABLE_CLKOUT` exists because the PCF8563 emits a 32.768 kHz square wave by default and never stops. The firmware does not use the RTC for timekeeping, so the output is pure waste — it costs current if the line is routed and pulled up, and it drains the board's MS412 backup cell whenever main power is absent. Disabling it is one-way safe: per the datasheet the pin goes high-impedance rather than resting at a level. Set to `0` if you intend to use CLKOUT as a clock source.
 
 ---
 
@@ -248,11 +260,11 @@ main/
   socials.h             link table
   embedded_assets.h     asm symbols for the font, avatar declaration
   graphics_core.*       flush_cb, rotation, L8 to 4bpp, full-refresh flag
-  gt911_touch.*         I2C touch driver, lv_indev read callback
-  power_manager.*       light sleep, deep sleep
+  gt911_touch.*         I2C touch driver, lv_indev callback, RTC CLKOUT
+  power_manager.*       light sleep, deep sleep, sleep button
   battery.*             ADC sampling, discharge curve
   widgets.*             BaseComponent, Label, QRCodePrimitive, StatusBar
-  panels.*              ProfilePanel, QrPanel, SocialPanel, CardScene
+  panels.*              ProfilePanel, QrPanel, SocialPanel, CardScene, SleepPanel
   display_engine.*      LVGL init, widget tree, main loop, dispatch
   avatar.c              generated LVGL image
   ui_font_jp.otf        font subset, built by fonts/build_font.py
@@ -292,14 +304,35 @@ Order is load-bearing:
 
 Moving the step-2 check after `lv_timer_handler()`, or into `applyOrientation()`, clears the panel while LVGL redraws only dirty regions — the interface disappears.
 
+A long press on the rotate button raises the same flag manually.
+
 ### 4.5 Sleep
 
-Idle loop: `vTaskDelay(1)` → `esp_light_sleep_start(150 ms)` → poll touch via `lv_timer_handler`.
+Two modes.
+
+**Light sleep — automatic, after `SLEEP_IDLE_TIMEOUT_MS` of inactivity.**
+
+Loop: `vTaskDelay(1)` → `esp_light_sleep_start(150 ms)` → poll touch via `lv_timer_handler`. Any touch resumes normal operation.
 
 - `vTaskDelay(1)` is required; light sleep is not a scheduler block and `DisplayTask` would starve core 1's idle task, which the task watchdog monitors with a 5 s timeout.
-- Timer is the only wake source. GPIO wake from light sleep is level-triggered; the GT911 emits a pulse on INT, and switching it to level-hold requires a checksum-protected config write.
-- `CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP` is what makes the savings real. Flash and PSRAM stay powered, so frame buffers survive.
-- Deep sleep is never entered. GPIO47 is outside the RTC domain (GPIO0–21), so touch cannot wake from it. `power_enter_deep_sleep()` exists but is uncalled.
+- The timer is the only wake source. GPIO wake from light sleep is level-triggered, and the GT911 emits a pulse on INT rather than a level.
+- The touch controller stays awake throughout by design — it is polled every 150 ms. That, not the CPU, is the dominant term in light sleep current.
+
+**Deep sleep — manual, by holding IO21, or automatic below `BATTERY_CRITICAL_PERCENT`.**
+
+Before powering down, `DisplayEngine::enterDeepSleep()` renders `SleepPanel` and drives `lv_timer_handler` to completion. E-ink retains the image, so a switched-off badge still shows an avatar and a QR code.
+
+Only IO21 wakes the device. Touch cannot: GPIO47 is outside the RTC domain, which covers only GPIO0–21.
+
+### 4.6 Touch controller sleep
+
+`gt911_sleep()` drives INT low, waits, then writes `0x05` to register `0x8040`.
+
+The INT step is mandatory and easy to miss. The Goodix programming guide requires INT to be low before the sleep command; sent with the pin floating, the controller silently ignores it and keeps scanning — the I2C write still returns success. INT is left low afterwards, because a high level is what wakes the part.
+
+Before deep sleep, `power_enter_deep_sleep()` latches INT with `gpio_hold_en` so it stays low once the digital domain powers down. `power_release_panel_pins()` clears the latch on the next boot, before `i2c_bus_init()` drives INT high to select the 0x5D address.
+
+Getting this wrong costs several milliamps of standby current and is invisible in logs.
 
 ---
 
@@ -338,14 +371,16 @@ Add to `CardScene`:
 
 Selection callbacks follow `SocialPanel`: a C function pointer plus `void* user_data`, set via `setOnSelect`.
 
+Panels needing an avatar can call the file-local `build_avatar()` and `size_avatar()` helpers, which `ProfilePanel` and `SleepPanel` share.
+
 ### 5.3 Adding a scene
 
-No scene manager exists. `DisplayEngine` owns one `CardScene directly`. For a second scene:
+No scene manager exists. `DisplayEngine` owns `CardScene` and `SleepPanel` directly, toggling them with `setVisible()`. For a third:
 
 1. New class alongside `CardScene`, same shape: constructor takes `(parent, ctx)`, exposes `updateLayout(bool is_portrait)`
 2. Add a member to `DisplayEngine`, construct in `buildUI()`
 3. Switch with `setVisible()`, then `lv_obj_invalidate(m_screen_root)`
-4. Call `updateLayout()` on the visible scene from `applyOrientation()`
+4. Call `updateLayout()` on it from `applyOrientation()` — hidden panels still need to track orientation, since `SleepPanel` is rendered on the way into deep sleep with no chance to lay out afterwards
 
 Scene switching changes the whole frame; request a full refresh to avoid residue:
 
@@ -381,7 +416,13 @@ This maps raw GT911 axes onto physical panel axes — the film is bonded at 90°
 
 Long-press threshold is set in `initLvgl()` via `lv_indev_set_long_press_time(m_indev, 1000)`.
 
-### 5.6 Renaming the embedded font
+### 5.6 Using the RTC
+
+`RTC_DISABLE_CLKOUT` only switches off the clock output; the timekeeping side is untouched and backed by the on-board MS412 cell, so time survives a battery disconnect.
+
+The PCF8563 answers at `PCF8563_ADDR` on the same bus as the touch controller. Nothing reads it today — `rtc_disable_clkout()` in `gt911_touch.cpp` is the only access, and it shows the register write pattern.
+
+### 5.7 Renaming the embedded font
 
 The build derives asm symbols from the embedded filename. Renaming `ui_font_jp.otf` means changing all four of:
 
@@ -397,24 +438,47 @@ Then `idf.py fullclean` — stale object files carry the old symbol names, and t
 ## 6. Behaviour notes
 
 - `epd_clear_area()` before every write is mandatory. `epd_draw_grayscale_image()` drives particles from their current state; without it, images superimpose.
-- Battery percentage updates are suppressed when unchanged (`s_last_percent` in `batteryTimerCb`), preventing idle repaints from advancing the ghost-clear counter.
+- Battery percentage updates are suppressed when unchanged (`m_battery_percent`), preventing idle repaints from advancing the ghost-clear counter.
 - `STATUS_BATTERY_LABEL_WIDTH` is fixed to stop the flex row reflowing on text change, which would repaint the rotate button.
 - Charging is not detectable. The ADC sits after the charge controller, which holds the rail at float voltage — electrically identical to a full cell.
 - A character missing from the font subset renders as blank space, with no warning.
 
 ## 7. Known limitations
 
+- **Below `BATTERY_CRITICAL_PERCENT` the badge will not stay on.** It renders the sleep screen and powers down again within a minute of waking. Charge it, or set the threshold to `0` to disable the protection.
+- Battery reads 100% on USB power, so the low-battery cutoff does not trigger while charging.
 - Smart chargers and power banks cut power once the badge sleeps; draw falls below their load-detection threshold. Observed ~20 s on a laptop port, ~3 min on a wall charger. Not an issue on battery.
-- Battery reads 100% on USB power.
-- USB Serial/JTAG console does not survive light sleep. For power debugging, switch the console to UART0 (IO43/IO44).
+- USB Serial/JTAG console does not survive light sleep, and `power_enter_deep_sleep()` shuts it down deliberately. For power debugging, switch the console to UART0 (IO43/IO44).
+- Standby current is still above the ~388 µA the vendor demo reports for this board. Long-term measurement pending; see 8.
 
-## 8. Backlog
+## 8. Standby current
+
+Deep sleep on this board is widely reported as drawing milliamps instead of microamps — see [LilyGo-EPD47 issue #144](https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/issues/144). This firmware started at roughly 10 mA and now measures around 1.2 mA, estimated from battery percentage over ten-hour intervals.
+
+**The cause was the touch controller never entering sleep.** The Goodix programming guide requires INT to be driven low before the sleep command; the reference driver does not do this, so the controller ignores the command and keeps scanning. The I2C write reports success either way, which is why it goes unnoticed.
+
+Verified directly — touch samples registered over ten seconds after each step:
+
+| Step                              | Samples |
+| --------------------------------- | ------- |
+| Awake                             | 4       |
+| After the plain sleep command     | 5       |
+| After driving INT low, then sleep | 0       |
+
+This also explains why light and deep sleep measured the same before the fix: the controller was awake in both, and its draw swamped the difference.
+
+Two hypotheses were tested and rejected: forcing the panel data lines low before sleep (no measurable effect, and the vendor demo does not do it), and leakage through the panel rail (the power LED confirms `epd_poweroff_all()` works).
+
+Figures here are preliminary. A multi-week measurement is in progress and this section will be updated with the final number.
+
+## 9. Backlog
 
 - Shared `lv_style_t` objects; every `lv_obj_set_style_*` call allocates
 - Replace raw owning pointers in UI components with values or `unique_ptr`
-- PCF8563 RTC unused; I2C 0x51, interrupt on IO09
+- Close the remaining gap to the vendor's 388 µA — `rtc_gpio_pullup_en()` on the wake pin keeps the RTC peripheral domain powered and is the next candidate
+- PCF8563 timekeeping is available but unused; see 5.6
 
-## 9. Licenses
+## 10. Licenses
 
 This repository is [MIT](LICENSE)
 
