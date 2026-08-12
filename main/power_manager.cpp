@@ -1,5 +1,7 @@
 #include "power_manager.h"
 
+#include <stdio.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_sleep.h"
@@ -7,6 +9,8 @@
 #include "driver/i2c.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
+#include "driver/periph_ctrl.h"
+#include "esp_rom_uart.h"
 
 #include "app_config.h"
 #include "gt911_touch.h"
@@ -14,101 +18,45 @@
 extern "C"
 {
 #include "epd_driver.h"
-#include "ed047tc1.h"
 }
 
 static const char *TAG = "POWER";
 
-// ============================================================
-// PANEL LINES
-//
-// Taken from the driver's own definitions rather than hard-coded
-// numbers, so this tracks any upstream pin change.
-//
-// CFG_STR is deliberately excluded. It is IO0, the strapping pin that
-// selects download mode at reset, and holding it low across a wake
-// would drop the chip into the bootloader instead of the firmware.
-// That leaves part of the shift register unlatched, which is an
-// accepted trade-off.
-// ============================================================
-static const gpio_num_t EPD_PINS[] = {
-    D0,
-    D1,
-    D2,
-    D3,
-    D4,
-    D5,
-    D6,
-    D7,
-    CKV,
-    STH,
-    CKH,
-    CFG_DATA,
-    CFG_CLK,
-};
-
-static constexpr size_t EPD_PIN_COUNT = sizeof(EPD_PINS) / sizeof(EPD_PINS[0]);
-
-// ============================================================
-// Drive the panel lines low and latch them before deep sleep.
-//
-// With the EPD rail switched off by epd_poweroff_all(), any pin left
-// high or floating leaks current through the panel's clamping diodes
-// back into the dead rail. This is a documented board-level issue on
-// the T5-4.7: upstream measured STH and CKH sitting at roughly 2.2 V
-// after poweroff, and it accounts for several milliamps in deep sleep
-// where the datasheet promises microamps.
-//
-// gpio_hold_en latches the level across the sleep transition. Without
-// it the digital domain powers down and the pins float again.
-//
-// This does not eliminate the leak. Whatever the shift register
-// drives stays outside SoC control, so some current path remains
-// regardless.
-// ============================================================
-static void isolate_panel_pins()
-{
-    for (size_t i = 0; i < EPD_PIN_COUNT; i++)
-    {
-        gpio_num_t pin = EPD_PINS[i];
-
-        gpio_reset_pin(pin);
-        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-        gpio_set_level(pin, 0);
-
-        // Pins above IO21 sit outside the RTC domain on the S3 and may
-        // refuse to hold. Failures are logged rather than fatal - such
-        // a pin simply floats as it did before, and the level set
-        // above still helps until the domain powers down.
-        esp_err_t err = gpio_hold_en(pin);
-        if (err != ESP_OK)
-        {
-            ESP_LOGW(TAG, "gpio_hold_en failed on IO%d: %s",
-                     (int)pin, esp_err_to_name(err));
-        }
-    }
-
-    // Enables the hold mechanism for the sleep transition itself.
-    // Without this the individual holds are released when the digital
-    // domain powers down.
-    gpio_deep_sleep_hold_en();
-
-    ESP_LOGI(TAG, "Panel pins driven low and latched");
-}
-
 void power_release_panel_pins()
 {
-    // Holds survive the wake transition, so without releasing them the
-    // panel driver cannot drive its own data bus and the display stays
-    // blank. Safe to call on a cold boot, where no holds exist.
+    // The touch interrupt line is latched low before deep sleep to keep
+    // the controller asleep. It has to be released before
+    // i2c_bus_init(), which drives INT high to select the 0x5D address -
+    // a latched pin would leave the touch undetected.
+    //
+    // Safe on a cold boot, where no hold exists.
     gpio_deep_sleep_hold_dis();
+    gpio_hold_dis((gpio_num_t)TOUCH_INT_PIN);
 
-    for (size_t i = 0; i < EPD_PIN_COUNT; i++)
-    {
-        gpio_hold_dis(EPD_PINS[i]);
-    }
+    ESP_LOGI(TAG, "Pin latches released");
+}
 
-    ESP_LOGI(TAG, "Panel pin latches released");
+// ============================================================
+// Shut down the debug console before deep sleep.
+//
+// The vendor demo calls Serial.end() at this point and reports 388 uA
+// for the board. ESP-IDF has no direct equivalent for the USB
+// Serial/JTAG console, so this drains the output and gates the
+// peripheral's clock instead.
+//
+// Nothing can be logged after this returns.
+// ============================================================
+static void shutdown_console()
+{
+    // Let anything still queued reach the host before the peripheral
+    // goes away, otherwise the last lines are lost.
+    fflush(stdout);
+    esp_rom_uart_tx_wait_idle(0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    periph_module_disable(PERIPH_USB_MODULE);
+#endif
 }
 
 void power_button_init()
@@ -164,9 +112,11 @@ void power_light_sleep_ms(uint32_t duration_ms)
     // Switching INT to level-hold mode means writing register 0x804D,
     // which sits inside a checksum-protected configuration block: a
     // naive single-byte write makes the controller reject the config
-    // or reset itself. Not worth the risk for a latency improvement
-    // nobody can perceive - 150 ms disappears next to the hundreds of
-    // milliseconds an e-ink redraw takes.
+    // or reset itself.
+    //
+    // Note the touch controller stays awake throughout this mode by
+    // design - it is polled every 150 ms. That is the dominant term in
+    // light sleep current, not the CPU.
     esp_sleep_enable_timer_wakeup((uint64_t)duration_ms * 1000ULL);
 
     esp_light_sleep_start();
@@ -185,12 +135,24 @@ void power_enter_deep_sleep()
     // whatever was last drawn.
     epd_poweroff_all();
 
-    // Order matters: cut the panel's power first, then pull its lines
-    // down. The reverse would drive zeros into a live panel.
-    isolate_panel_pins();
-
+    // Leaves INT driven low, which is what keeps the controller down.
     gt911_sleep();
+
     i2c_driver_delete(I2C_MASTER_NUM);
+
+    // Latch INT low across the sleep transition. Once the digital
+    // domain powers down the pin floats, and a high level is exactly
+    // what brings the touch controller back out of sleep. Without this
+    // the controller resumes and draws milliamps for the whole sleep -
+    // which is what made deep sleep no better than light sleep before
+    // the fix.
+    esp_err_t hold_err = gpio_hold_en((gpio_num_t)TOUCH_INT_PIN);
+    if (hold_err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "gpio_hold_en failed on TOUCH_INT: %s",
+                 esp_err_to_name(hold_err));
+    }
+    gpio_deep_sleep_hold_en();
 
     // Hold the button high through sleep so a press reliably pulls it
     // low. The regular GPIO pull-up is not retained once the digital
@@ -201,6 +163,9 @@ void power_enter_deep_sleep()
     esp_sleep_enable_ext1_wakeup((1ULL << SLEEP_BUTTON_PIN), ESP_EXT1_WAKEUP_ANY_LOW);
 
     ESP_LOGI(TAG, "Entering deep sleep, IO%d wakes", SLEEP_BUTTON_PIN);
-    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Last thing before sleeping: nothing is logged after this.
+    shutdown_console();
+
     esp_deep_sleep_start();
 }

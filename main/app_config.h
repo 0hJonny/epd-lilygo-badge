@@ -26,11 +26,39 @@
 #define DISPLAY_STACK_SIZE 16384
 
 // ------------------------------------------------------------
+// Render mode
+//
+// PARTIAL redraws only the regions LVGL marked dirty. That is what
+// this firmware is tuned for: tapping a link repaints two list rows
+// and the QR, not the whole screen.
+//
+// FULL renders the entire 960x540 frame on every change. Slower and
+// heavier on the panel, but immune to any partial-update artefact -
+// worth switching to if regional refresh looks wrong on your unit.
+//
+// In FULL mode every frame is already a full frame, so the periodic
+// whole-screen clear is skipped and EINK_GHOST_CLEAR_INTERVAL is
+// unused.
+// ------------------------------------------------------------
+#define RENDER_MODE_PARTIAL 1
+#define RENDER_MODE_FULL 2
+
+#ifndef RENDER_MODE
+#define RENDER_MODE RENDER_MODE_PARTIAL
+#endif
+
+#if RENDER_MODE == RENDER_MODE_FULL
+#define LV_RENDER_MODE LV_DISPLAY_RENDER_MODE_FULL
+#else
+#define LV_RENDER_MODE LV_DISPLAY_RENDER_MODE_PARTIAL
+#endif
+
+// ------------------------------------------------------------
 // How many frames between automatic full panel refreshes.
 //
-// epd_clear_area() prepares each region before it is written, but
-// it does not undo cumulative particle drift - faint smears build
-// up over dozens of redraws. A full epd_clear() removes them.
+// epd_clear_area() prepares each region before it is written, but it
+// does not undo cumulative particle drift - faint smears build up
+// over dozens of redraws. A full epd_clear() removes them.
 //
 // Lower values mean a cleaner panel and more flashing. A long press
 // on the rotate button triggers the same refresh manually, so this
@@ -41,12 +69,28 @@
 // ------------------------------------------------------------
 // Link list metrics.
 //
-// If the list overflows or leaves too much empty space on your
-// panel, these are the first numbers to adjust.
+// If the list overflows or leaves too much empty space on your panel,
+// these are the first numbers to adjust.
 // ------------------------------------------------------------
 #define SOCIAL_ROW_HEIGHT_LANDSCAPE 47
 #define SOCIAL_ROW_HEIGHT_PORTRAIT 45
 #define SOCIAL_ROW_GAP 8
+
+// ------------------------------------------------------------
+// Fixed width of the battery label in the status bar.
+//
+// Must fit the longest string ui().battery_fmt can produce, which
+// depends on the interface language. Too small and the text clips;
+// too large and the rotate button drifts toward the centre.
+//
+// A fixed width also stops the flex row reflowing when the text
+// changes, which would repaint the button on every battery update.
+// ------------------------------------------------------------
+#if UI_LANG == UI_LANG_EN
+#define STATUS_BATTERY_LABEL_WIDTH 170
+#else
+#define STATUS_BATTERY_LABEL_WIDTH 130
+#endif
 
 // ============================================================
 // PIN ASSIGNMENT - LILYGO T5-4.7-S3
@@ -60,15 +104,17 @@
 #define GT911_ADDR 0x5D
 #define TOUCH_INT_PIN 47
 
-// BOOT button. Only wakes the device from deep sleep, which the
-// firmware no longer enters on its own - see power_manager.h.
+// PCF8563 real-time clock, same bus as the touch controller.
+#define PCF8563_ADDR 0x51
+
+// BOOT button. Not used - see SLEEP_BUTTON_PIN.
 #define WAKEUP_BUTTON_PIN 0
 
 // ============================================================
 // BATTERY MEASUREMENT
 //
 // Verify the pin against the schematic for YOUR board revision.
-// On T5-4.7-S3 (V2.3) it is GPIO14, which maps to ADC2 channel 3.
+// On T5-4.7-S3 (V2.4) it is GPIO14, which maps to ADC2 channel 3.
 // Both defines below must change together.
 //
 // ADC2 channel mapping on ESP32-S3:
@@ -94,39 +140,62 @@
 #define BATTERY_MV_EMPTY 3300
 
 // ============================================================
-// AUTOMATIC SLEEP
+// BATTERY PROTECTION
+//
+// Below this charge level the badge forces itself into deep sleep
+// instead of continuing to idle. Li-Po cells degrade when taken to
+// full discharge, and idle current alone will flatten one over a few
+// weeks of storage.
+//
+// Set to 0 to disable the protection entirely.
+//
+// The check runs only after a successful ADC reading, so a board with
+// no battery attached - or with the ADC misconfigured - never trips
+// it accidentally.
+// ============================================================
+#define BATTERY_CRITICAL_PERCENT 5
+
+// ============================================================
+// REAL-TIME CLOCK
+//
+// The board carries a PCF8563 at I2C 0x51, backed by a rechargeable
+// MS412 cell. This firmware does not use it for timekeeping.
+//
+// Its CLKOUT pin emits a 32.768 kHz square wave by default and keeps
+// doing so forever. On an open-drain output with a pull-up that costs
+// a few hundred microamps continuously, and it drains the backup cell
+// whenever main power is absent - NXP ties multi-week backup
+// operation to having CLKOUT switched off.
+//
+// Disabling it is one-way safe: the datasheet specifies the pin goes
+// high-impedance rather than resting at a level.
+//
+// Set to 0 if you intend to use CLKOUT as a clock source for
+// something, or would rather leave the RTC untouched.
+// ============================================================
+#define RTC_DISABLE_CLKOUT 1
+
+// ============================================================
+// SLEEP
 // ============================================================
 
-// Inactivity before entering the power-saving loop.
+// Inactivity before entering the light-sleep power-saving loop.
 #define SLEEP_IDLE_TIMEOUT_MS 30000
 
-// Wake interval while sleeping, used to poll the touch controller.
-// This is also the worst-case response latency to a tap. Lower is
-// more responsive but draws more average current; 150 ms is
+// Wake interval while in that loop, used to poll the touch
+// controller. This is also the worst-case response latency to a tap.
+// Lower is more responsive but draws more average current; 150 ms is
 // invisible next to the hundreds of milliseconds an e-ink redraw
 // takes.
 #define SLEEP_TOUCH_POLL_MS 150
-
-// Fixed width of the battery label in the status bar.
-//
-// Must fit the longest string ui().battery_fmt can produce, which
-// depends on the interface language: Japanese "電池 100%" needs
-// about 130 px at font size 24, English "Battery 100%" about 170.
-// Too small and the text is clipped; too large and the rotate
-// button drifts toward the centre.
-#if UI_LANG == UI_LANG_EN
-#define STATUS_BATTERY_LABEL_WIDTH 170
-#else
-#define STATUS_BATTERY_LABEL_WIDTH 130
-#endif
 
 // ------------------------------------------------------------
 // Manual deep sleep button
 //
 // IO21 rather than IO00: the latter is a strapping pin, and holding
 // it low across a reset can drop the chip into download mode instead
-// of running the firmware. Deep sleep wakeup goes through a reset,
-// so that risk is real.
+// of running the firmware. Deep sleep wakeup goes through a reset, so
+// that risk is real.
 //
 // IO21 also sits inside the RTC domain (GPIO0-21), which is a hard
 // requirement for EXT1 wakeup. The touch controller on IO47 does not,
@@ -141,31 +210,3 @@
 // Long enough that a stray press while handling the badge does not
 // switch it off mid-conversation.
 #define SLEEP_BUTTON_HOLD_MS 2000
-
-// ============================================================
-// RENDER MODE
-//
-// PARTIAL redraws only the regions LVGL marked dirty. That is what
-// this firmware is tuned for: tapping a link repaints two list rows
-// and the QR, not the whole screen.
-//
-// FULL renders the entire 960x540 frame on every change. Slower and
-// heavier on the panel, but immune to any partial-update artefact -
-// worth switching to if regional refresh looks wrong on your unit.
-//
-// Note the interaction with EINK_GHOST_CLEAR_INTERVAL below: in FULL
-// mode every frame is already a full frame, so the periodic
-// whole-screen clear is skipped and the counter is unused.
-// ============================================================
-#define RENDER_MODE_PARTIAL 1
-#define RENDER_MODE_FULL 2
-
-#ifndef RENDER_MODE
-#define RENDER_MODE RENDER_MODE_PARTIAL
-#endif
-
-#if RENDER_MODE == RENDER_MODE_FULL
-#define LV_RENDER_MODE LV_DISPLAY_RENDER_MODE_FULL
-#else
-#define LV_RENDER_MODE LV_DISPLAY_RENDER_MODE_PARTIAL
-#endif

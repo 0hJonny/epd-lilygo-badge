@@ -38,6 +38,27 @@ static void i2c_scanner()
     ESP_LOGI(TAG, "================");
 }
 
+void rtc_disable_clkout()
+{
+    // Register 0x0D, CLKOUT_control. Bit 7 (FE) enables the output;
+    // the low two bits select frequency. Writing zero clears both.
+    //
+    // Per the datasheet a disabled CLKOUT goes high-impedance rather
+    // than resting at a level, so this can only reduce current draw,
+    // never raise it.
+    uint8_t cmd[2] = {0x0D, 0x00};
+    esp_err_t err = i2c_master_write_to_device(I2C_MASTER_NUM, PCF8563_ADDR,
+                                               cmd, 2, pdMS_TO_TICKS(50));
+    if (err == ESP_OK)
+    {
+        ESP_LOGI(TAG, "PCF8563 CLKOUT disabled");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "PCF8563 CLKOUT disable failed: %s", esp_err_to_name(err));
+    }
+}
+
 void i2c_bus_init()
 {
     ESP_LOGI(TAG, "Initialising INT pin and I2C bus...");
@@ -48,7 +69,9 @@ void i2c_bus_init()
     gpio_set_level((gpio_num_t)TOUCH_INT_PIN, 1);
     vTaskDelay(pdMS_TO_TICKS(20));
 
-    // Release the pin once the address is latched.
+    // Release the pin once the address is latched. The datasheet
+    // requires INT to float when used as an input - no internal
+    // pull-ups.
     vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_direction((gpio_num_t)TOUCH_INT_PIN, GPIO_MODE_INPUT);
 
@@ -77,6 +100,10 @@ void i2c_bus_init()
     }
 
     i2c_scanner();
+
+#if RTC_DISABLE_CLKOUT
+    rtc_disable_clkout();
+#endif
 }
 
 static bool gt911_read_touch(int16_t &x, int16_t &y)
@@ -115,9 +142,9 @@ static bool gt911_read_touch(int16_t &x, int16_t &y)
     }
 
     // CRITICAL: clear the buffer-ready flag unconditionally.
-    // Skipping this on release, when point_num is zero, leaves the
-    // flag set and the controller stops reporting new touches
-    // entirely - the screen appears to freeze.
+    // Skipping this on release, when point_num is zero, leaves the flag
+    // set and the controller stops reporting new touches entirely - the
+    // screen appears to freeze.
     uint8_t clr_cmd[3] = {0x81, 0x4E, 0x00};
     i2c_master_write_to_device(I2C_MASTER_NUM, GT911_ADDR, clr_cmd, 3, pdMS_TO_TICKS(10));
 
@@ -127,14 +154,41 @@ static bool gt911_read_touch(int16_t &x, int16_t &y)
 void gt911_sleep()
 {
     ESP_LOGI(TAG, "Sending sleep command to the GT911...");
+
+    // INT must be driven low before the command, per the Goodix
+    // programming guide. Sent with INT floating, the controller
+    // silently ignores it and keeps running - verified on hardware:
+    // touches still registered after a plain sleep command, and
+    // stopped once INT was pulled low first.
+    gpio_config_t int_cfg = {};
+    int_cfg.pin_bit_mask = (1ULL << TOUCH_INT_PIN);
+    int_cfg.mode = GPIO_MODE_OUTPUT;
+    int_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    int_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    int_cfg.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&int_cfg);
+    gpio_set_level((gpio_num_t)TOUCH_INT_PIN, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+
     uint8_t sleep_cmd[3] = {0x80, 0x40, 0x05};
-    i2c_master_write_to_device(I2C_MASTER_NUM, GT911_ADDR, sleep_cmd, 3, pdMS_TO_TICKS(50));
+    esp_err_t err = i2c_master_write_to_device(I2C_MASTER_NUM, GT911_ADDR,
+                                               sleep_cmd, 3, pdMS_TO_TICKS(50));
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Sleep command failed: %s", esp_err_to_name(err));
+    }
+
+    // INT stays low on purpose. A high level is what wakes the part, so
+    // releasing the pin risks it drifting up and undoing the sleep. The
+    // guide also requires at least 58 ms between the sleep command and
+    // any wake attempt.
+    vTaskDelay(pdMS_TO_TICKS(60));
 }
 
-// Fixed correction for how the touch film is bonded to the panel:
-// on the T5-4.7 the two are rotated 90 degrees relative to each
-// other, so raw GT911 axes have to be mapped onto physical panel
-// axes.
+// Fixed correction for how the touch film is bonded to the panel: on
+// the T5-4.7 the two are rotated 90 degrees relative to each other, so
+// raw GT911 axes have to be mapped onto physical panel axes.
 //
 // This is NOT screen-rotation handling. LVGL 9 transforms coordinates
 // itself inside lv_display_set_rotation(), and this correction is

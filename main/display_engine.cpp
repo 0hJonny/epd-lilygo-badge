@@ -29,8 +29,8 @@ static const char *TAG = "DISPLAY_ENGINE";
 DisplayEngine::DisplayEngine(QueueHandle_t q)
     : m_queue(q), m_disp(nullptr), m_indev(nullptr),
       m_screen_root(nullptr), m_statusbar(nullptr), m_card_scene(nullptr),
-      m_sleep_panel(nullptr), m_battery_timer(nullptr), m_is_idle(false),
-      m_button_down_us(0) {}
+      m_sleep_panel(nullptr), m_battery_timer(nullptr),
+      m_battery_percent(0xFF), m_is_idle(false), m_button_down_us(0) {}
 
 void DisplayEngine::initLvgl()
 {
@@ -64,6 +64,7 @@ void DisplayEngine::initLvgl()
 #else
     ESP_LOGI(TAG, "Render mode: PARTIAL");
 #endif
+
     lv_display_set_flush_cb(m_disp, epd_flush_cb);
     lv_display_add_event_cb(m_disp, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
@@ -73,9 +74,9 @@ void DisplayEngine::initLvgl()
     lv_indev_set_read_cb(m_indev, lv_touchpad_read);
     lv_indev_set_display(m_indev, m_disp);
 
-    // The rotate button distinguishes a tap from a long press. The
-    // LVGL default threshold is short enough to trigger by accident
-    // on a panel that responds slowly, so it is raised here.
+    // The rotate button distinguishes a tap from a long press. The LVGL
+    // default threshold is short enough to trigger by accident on a
+    // panel that responds slowly, so it is raised here.
     lv_indev_set_long_press_time(m_indev, 1000);
 
     size_t font_size_bytes = font_end - font_start;
@@ -106,8 +107,8 @@ void DisplayEngine::buildUI()
     m_card_scene = new CardScene(m_screen_root, &m_ctx);
     m_card_scene->selectSocialByIndex(g_selected_social_index);
 
-    // Created hidden. Sits alongside the card rather than inside it,
-    // so it can cover the status bar too.
+    // Created hidden. Sits alongside the card rather than inside it, so
+    // it can cover the status bar too.
     m_sleep_panel = new SleepPanel(m_screen_root, &m_ctx);
 
     applyOrientation();
@@ -120,15 +121,15 @@ void DisplayEngine::applyOrientation()
     ESP_LOGI(TAG, "Applying orientation: %s", is_portrait ? "portrait" : "landscape");
 
     // LVGL rotates rendering and touch coordinates itself. The fixed
-    // axis correction in lv_touchpad_read is a separate concern -
-    // see the comment there before touching either.
+    // axis correction in lv_touchpad_read is a separate concern - see
+    // the comment there before touching either.
     lv_display_set_rotation(m_disp, to_lv_rotation(g_rotation));
 
     m_card_scene->updateLayout(is_portrait);
 
-    // The sleep panel is hidden but still has to track orientation:
-    // it is rendered on the way into deep sleep, with no chance to
-    // lay out afterwards.
+    // The sleep panel is hidden but still has to track orientation: it
+    // is rendered on the way into deep sleep, with no chance to lay out
+    // afterwards.
     m_sleep_panel->updateLayout(is_portrait);
 
     // The whole frame changes, so invalidate unconditionally.
@@ -140,8 +141,8 @@ void DisplayEngine::applyOrientation()
 //
 // The esp_timer callback runs on the timer service task, not on the
 // display task, so it must not touch LVGL. It formats the string and
-// posts it to the same queue button presses use, keeping every
-// widget call on a single thread.
+// posts it to the same queue button presses use, keeping every widget
+// call on a single thread.
 // ============================================================
 void DisplayEngine::batteryTimerCb(void *arg)
 {
@@ -153,19 +154,23 @@ void DisplayEngine::batteryTimerCb(void *arg)
 
     uint8_t percent = battery_mv_to_percent(mv);
 
-    // Skip the update when nothing changed. A repaint costs a panel
+    ESP_LOGI(TAG, "Battery: %u mV -> %u%%", (unsigned)mv, (unsigned)percent);
+
+    // Skip the redraw when nothing changed. A repaint costs a panel
     // refresh and advances the ghost-clear counter, so posting an
-    // identical value once a minute would eventually make an idle
-    // badge flash on its own. 0xFF is a value percent never takes.
-    static uint8_t s_last_percent = 0xFF;
-    if (percent == s_last_percent)
+    // identical value once a minute would eventually make an idle badge
+    // flash on its own.
+    //
+    // The stored value updates regardless - the main loop reads it for
+    // the low-battery check.
+    bool changed = (percent != self->m_battery_percent);
+    self->m_battery_percent = percent;
+
+    if (!changed)
         return;
-    s_last_percent = percent;
 
     char buf[32];
     snprintf(buf, sizeof(buf), ui().battery_fmt, (unsigned)percent);
-
-    ESP_LOGI(TAG, "Battery: %u mV -> %u%%", (unsigned)mv, (unsigned)percent);
 
     UIEvent cmd;
     cmd.command = CommandType::UPDATE_BATTERY;
@@ -212,8 +217,8 @@ void DisplayEngine::startBatteryTimer()
 // SLEEP BUTTON
 //
 // Polled from the main loop rather than driven by an interrupt: the
-// loop already runs at least every 150 ms, which is far finer than
-// the multi-second hold this measures.
+// loop already runs at least every 150 ms, which is far finer than the
+// multi-second hold this measures.
 // ============================================================
 void DisplayEngine::checkSleepButton()
 {
@@ -240,10 +245,36 @@ void DisplayEngine::checkSleepButton()
     }
 }
 
+// ============================================================
+// LOW BATTERY PROTECTION
+//
+// Idle current alone flattens a cell over weeks of storage, and a
+// Li-Po taken to full discharge degrades permanently. Below the
+// configured threshold the badge shuts down rather than idling on.
+//
+// Disabled when BATTERY_CRITICAL_PERCENT is 0.
+// ============================================================
+void DisplayEngine::checkBatteryLevel()
+{
+#if BATTERY_CRITICAL_PERCENT > 0
+    // 0xFF means no reading has completed yet. Acting on it would shut
+    // the badge down at boot on a board with no battery attached.
+    if (m_battery_percent == 0xFF)
+        return;
+
+    if (m_battery_percent > BATTERY_CRITICAL_PERCENT)
+        return;
+
+    ESP_LOGW(TAG, "Battery at %u%% - shutting down to protect the cell",
+             (unsigned)m_battery_percent);
+    enterDeepSleep();
+#endif
+}
+
 void DisplayEngine::enterDeepSleep()
 {
-    // Leaving the idle state first: the sleep screen has to render,
-    // and the full-refresh path is skipped while idle.
+    // Leaving the idle state first: the sleep screen has to render, and
+    // the full-refresh path is skipped while idle.
     m_is_idle = false;
 
     m_card_scene->setVisible(false);
@@ -251,20 +282,18 @@ void DisplayEngine::enterDeepSleep()
     m_sleep_panel->setVisible(true);
 
     // The sleep screen replaces everything. Without a full refresh,
-    // fragments of the card would show through and the badge would
-    // look broken rather than switched off.
+    // fragments of the card would show through and the badge would look
+    // broken rather than switched off.
     graphics_core_request_full_refresh();
     lv_obj_invalidate(m_screen_root);
 
     // Drive rendering to completion before cutting power. One
-    // lv_timer_handler call does not flush the whole invalidated
-    // area, and a half-drawn frame is what stays on the panel.
+    // lv_timer_handler call does not flush the whole invalidated area,
+    // and a half-drawn frame is what stays on the panel.
     for (int i = 0; i < 15; i++)
     {
-        uint32_t current_time = esp_timer_get_time() / 1000;
         lv_tick_inc(50);
         lv_timer_handler();
-        (void)current_time;
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
@@ -277,6 +306,8 @@ void DisplayEngine::enterDeepSleep()
 
 void DisplayEngine::loop()
 {
+    // Holds applied before deep sleep persist across the wake, and
+    // would block the touch controller from being detected.
     power_release_panel_pins();
 
     epd_init();
@@ -307,23 +338,20 @@ void DisplayEngine::loop()
         last_tick_time = current_time;
 
         checkSleepButton();
+        checkBatteryLevel();
 
 #if RENDER_MODE == RENDER_MODE_PARTIAL
         // The driver has asked for a full refresh - invalidate the
         // ENTIRE screen before handing control to LVGL.
         //
-        // Order is critical. epd_clear() inside epd_flush_cb wipes
-        // the whole panel, so the frame it fires on must be a full
-        // one. Move this check anywhere after lv_timer_handler, or
-        // into applyOrientation, and the panel gets cleared while
-        // LVGL redraws only what it considered dirty - the interface
+        // Order is critical. epd_clear() inside epd_flush_cb wipes the
+        // whole panel, so the frame it fires on must be a full one.
+        // Move this check anywhere after lv_timer_handler, or into
+        // applyOrientation, and the panel gets cleared while LVGL
+        // redraws only what it considered dirty - the interface
         // vanishes until the next full update.
         //
         // Skipped while asleep: nobody is looking.
-        //
-        // Not needed in FULL mode: every frame already covers the
-        // whole screen, so particle drift never accumulates
-        // unevenly.
         if (!m_is_idle && graphics_core_is_full_refresh_pending())
         {
             lv_obj_invalidate(m_screen_root);
@@ -368,14 +396,13 @@ void DisplayEngine::loop()
                 break;
 
             case CommandType::UPDATE_BATTERY:
-                // Not repainted while asleep: a redraw costs more
-                // than the reading itself and nobody is watching.
+                // Not repainted while asleep: a redraw costs more than
+                // the reading itself and nobody is watching.
                 if (event.payload && !m_is_idle)
                     m_statusbar->setBattery(event.payload);
                 break;
 
             case CommandType::FULL_REFRESH:
-                // Long press on the rotate button.
                 ESP_LOGI(TAG, "Command: FULL_REFRESH");
 #if RENDER_MODE == RENDER_MODE_PARTIAL
                 // The flag is consumed at the top of the next
@@ -383,9 +410,8 @@ void DisplayEngine::loop()
                 // invalidation happens.
                 graphics_core_request_full_refresh();
 #else
-                // In FULL mode there is nothing to accumulate, but
-                // the gesture should still do something visible -
-                // repaint on demand.
+                // In FULL mode there is nothing to accumulate, but the
+                // gesture should still do something visible.
                 lv_obj_invalidate(m_screen_root);
 #endif
                 break;
@@ -398,8 +424,8 @@ void DisplayEngine::loop()
         {
             // Yield to the idle task before sleeping. Light sleep is
             // not a scheduler block, so without this DisplayTask
-            // (priority 5, core 1) would monopolise its core and
-            // starve everything else pinned there.
+            // (priority 5, core 1) would monopolise its core and starve
+            // everything else pinned there.
             vTaskDelay(1);
 
             // Sleep until the next touch poll. On wake the loop runs

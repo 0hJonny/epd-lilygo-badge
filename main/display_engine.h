@@ -15,8 +15,8 @@
 // DISPLAY ENGINE
 //
 // Owns LVGL, the widget tree, and the main loop. Every LVGL call in
-// the firmware happens on this task; other contexts post commands
-// to m_queue instead.
+// the firmware happens on this task; other contexts post commands to
+// m_queue instead.
 // ============================================================
 class DisplayEngine
 {
@@ -33,6 +33,11 @@ private:
 
     esp_timer_handle_t m_battery_timer;
 
+    // Last reported charge level, or 0xFF before the first reading.
+    // Held here rather than as a static inside the timer callback so
+    // the main loop can act on it.
+    uint8_t m_battery_percent;
+
     // True while in the power-saving loop: short light sleeps
     // interleaved with touch polling.
     bool m_is_idle;
@@ -48,12 +53,14 @@ private:
     void startBatteryTimer();
     static void batteryTimerCb(void *arg);
 
-    // Poll the sleep button and trigger shutdown once held long
-    // enough.
+    // Poll the sleep button and trigger shutdown once held long enough.
     void checkSleepButton();
 
-    // Render the sleep screen, wait for the flush to finish, then
-    // power down. Does not return.
+    // Force deep sleep when the charge drops to a critical level.
+    void checkBatteryLevel();
+
+    // Render the sleep screen, wait for the flush to finish, then power
+    // down. Does not return.
     void enterDeepSleep();
 
 public:

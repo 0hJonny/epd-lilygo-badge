@@ -29,6 +29,12 @@ void power_wait_button_release();
 // power-on or a reset.
 bool power_woke_from_button();
 
+// Release the GPIO hold applied to the touch interrupt line before
+// deep sleep. Must run on every boot, before i2c_bus_init(): the hold
+// survives the wake transition, and a latched-low INT would stop the
+// touch controller being detected.
+void power_release_panel_pins();
+
 // A short light sleep. Peripherals and RAM - including the PSRAM
 // holding the LVGL frame buffer - are retained, the CPU stops, and
 // execution resumes in place after duration_ms.
@@ -41,15 +47,9 @@ void power_light_sleep_ms(uint32_t duration_ms);
 //
 // Touch cannot wake from deep sleep: GPIO47 is outside the ESP32-S3
 // RTC domain, which covers only GPIO0-21. That is why the button
-// exists at all, and why the caller must render a "sleeping" screen
-// first - the panel keeps showing it, so the badge has to look
-// deliberately off rather than frozen.
+// exists, and why the caller should render a "sleeping" screen first -
+// the panel keeps showing it, so the badge looks deliberately off
+// rather than frozen.
 //
 // Does not return.
 void power_enter_deep_sleep();
-
-// Release GPIO holds applied before deep sleep. Must be called on
-// every boot, before the panel driver initialises: holds survive the
-// wake transition and would block the driver from using its own data
-// bus, leaving the display blank.
-void power_release_panel_pins();
