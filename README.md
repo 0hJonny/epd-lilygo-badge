@@ -40,14 +40,14 @@ IO21 rather than IO00 for the button: IO00 is a strapping pin, and holding it lo
 
 Occupied by the board, not available:
 
-| Pins                   | Function                        |
-| ---------------------- | ------------------------------- |
-| IO00–IO07              | Panel data bus D0–D7            |
-| IO45, IO48             | Panel STV / LE                  |
-| IO11, IO15, IO16, IO42 | TF card SCLK / MOSI / MISO / CS |
-| IO09                   | PCF8563 interrupt               |
-| IO00, RST              | BOOT and reset buttons          |
-| IO19, IO20             | USB D-/D+                       |
+| Pins                   | Function                                          |
+| ---------------------- | ------------------------------------------------- |
+| IO00–IO07              | Panel data bus D0–D7; IO00 doubles as BOOT button |
+| IO45, IO48             | Panel STV / LE                                    |
+| IO11, IO15, IO16, IO42 | TF card SCLK / MOSI / MISO / CS                   |
+| IO09                   | PCF8563 interrupt                                 |
+| IO19, IO20             | USB D-/D+                                         |
+| RST                    | Reset button                                      |
 
 ADC2 channel mapping on ESP32-S3, for relocating the battery sense pin:
 
@@ -230,7 +230,7 @@ Rows can be added or removed freely. Above ~8 entries the list overflows in land
 | `STATUS_BATTERY_LABEL_WIDTH` | 130 / 170             | Fixed label width, per `UI_LANG`                                                      |
 | `RENDER_MODE`                | `RENDER_MODE_PARTIAL` | `PARTIAL` redraws dirty regions only; `FULL` repaints the whole panel on every change |
 
-`RTC_DISABLE_CLKOUT` exists because the PCF8563 emits a 32.768 kHz square wave by default and never stops. The firmware does not use the RTC for timekeeping, so the output is pure waste — it costs current if the line is routed and pulled up, and it drains the board's MS412 backup cell whenever main power is absent. Disabling it is one-way safe: per the datasheet the pin goes high-impedance rather than resting at a level. Set to `0` if you intend to use CLKOUT as a clock source.
+`RTC_DISABLE_CLKOUT` exists because the PCF8563 emits a 32.768 kHz square wave by default and never stops. The firmware does not use the RTC for timekeeping, so the output is pure waste — it costs current if the line is routed and pulled up, and it drains the board's MS412 backup cell whenever main power is absent. Disabling it is one-way safe: per the datasheet the pin goes high-impedance rather than resting at a level. Set to `0` if you intend to use CLKOUT as a clock source. Timekeeping itself is unaffected; see 5.6.
 
 ---
 
@@ -270,7 +270,21 @@ main/
   ui_font_jp.otf        font subset, built by fonts/build_font.py
 ```
 
-### 4.2 Threading
+### 4.2 Widget tree
+
+```
+lv_screen_active()
+├── StatusBar        badge chip, battery readout, rotate button
+├── CardScene        flex container, flips row/column by orientation
+│   ├── ProfilePanel avatar and caption
+│   ├── QrPanel      QR code and its label
+│   └── SocialPanel  the selectable link list
+└── SleepPanel       full-screen, hidden until shutdown
+```
+
+`SleepPanel` is a sibling of `CardScene`, not a child — it has to cover the status bar as well. `DisplayEngine` toggles the two with `setVisible()`.
+
+### 4.3 Threading
 
 All LVGL calls run on `DisplayTask` (priority 5, core 1). Other contexts post `UIEvent` to `m_queue`:
 
@@ -279,7 +293,7 @@ All LVGL calls run on `DisplayTask` (priority 5, core 1). Other contexts post `U
 
 `UIEvent::payload` is `strdup`'d by the sender and freed by the display task.
 
-### 4.3 Render pipeline
+### 4.4 Render pipeline
 
 ```
 LVGL renders to L8 buffer (PSRAM, 518 KB)
@@ -293,7 +307,7 @@ All three buffers are allocated once in `graphics_core_init()` and `initLvgl()`.
 
 `rounder_event_cb` aligns invalidated regions to even coordinates — required by 4bpp packing.
 
-### 4.4 Full refresh sequencing
+### 4.5 Full refresh sequencing
 
 Order is load-bearing:
 
@@ -306,7 +320,7 @@ Moving the step-2 check after `lv_timer_handler()`, or into `applyOrientation()`
 
 A long press on the rotate button raises the same flag manually.
 
-### 4.5 Sleep
+### 4.6 Sleep
 
 Two modes.
 
@@ -324,7 +338,7 @@ Before powering down, `DisplayEngine::enterDeepSleep()` renders `SleepPanel` and
 
 Only IO21 wakes the device. Touch cannot: GPIO47 is outside the RTC domain, which covers only GPIO0–21.
 
-### 4.6 Touch controller sleep
+### 4.7 Touch controller sleep
 
 `gt911_sleep()` drives INT low, waits, then writes `0x05` to register `0x8040`.
 
@@ -332,7 +346,7 @@ The INT step is mandatory and easy to miss. The Goodix programming guide require
 
 Before deep sleep, `power_enter_deep_sleep()` latches INT with `gpio_hold_en` so it stays low once the digital domain powers down. `power_release_panel_pins()` clears the latch on the next boot, before `i2c_bus_init()` drives INT high to select the 0x5D address.
 
-Getting this wrong costs several milliamps of standby current and is invisible in logs.
+Getting this wrong costs several milliamps of standby current and is invisible in logs. See 8.
 
 ---
 
@@ -362,7 +376,7 @@ Rules:
 
 ### 5.2 Adding a panel
 
-In `panels.h` / `panels.cpp`. Panels are `BaseComponent` subclasses parented to `CardScene::m_root`, which is a flex container.
+In `panels.h` / `panels.cpp`. Panels are `BaseComponent` subclasses; the three inside the card are parented to `CardScene::m_root`, a flex container.
 
 Add to `CardScene`:
 
@@ -373,12 +387,14 @@ Selection callbacks follow `SocialPanel`: a C function pointer plus `void* user_
 
 Panels needing an avatar can call the file-local `build_avatar()` and `size_avatar()` helpers, which `ProfilePanel` and `SleepPanel` share.
 
+A full-screen panel goes alongside `CardScene` on the root screen instead, the way `SleepPanel` does — see 5.3.
+
 ### 5.3 Adding a scene
 
-No scene manager exists. `DisplayEngine` owns `CardScene` and `SleepPanel` directly, toggling them with `setVisible()`. For a third:
+No scene manager exists. `DisplayEngine` owns `CardScene` and `SleepPanel` directly, both parented to `lv_screen_active()`, and toggles them with `setVisible()`. For a third:
 
-1. New class alongside `CardScene`, same shape: constructor takes `(parent, ctx)`, exposes `updateLayout(bool is_portrait)`
-2. Add a member to `DisplayEngine`, construct in `buildUI()`
+1. New class, same shape as `CardScene`: constructor takes `(parent, ctx)`, exposes `updateLayout(bool is_portrait)`
+2. Add a member to `DisplayEngine`, construct it in `buildUI()` with `m_screen_root` as the parent
 3. Switch with `setVisible()`, then `lv_obj_invalidate(m_screen_root)`
 4. Call `updateLayout()` on it from `applyOrientation()` — hidden panels still need to track orientation, since `SleepPanel` is rendered on the way into deep sleep with no chance to lay out afterwards
 
@@ -449,11 +465,10 @@ Then `idf.py fullclean` — stale object files carry the old symbol names, and t
 - Battery reads 100% on USB power, so the low-battery cutoff does not trigger while charging.
 - Smart chargers and power banks cut power once the badge sleeps; draw falls below their load-detection threshold. Observed ~20 s on a laptop port, ~3 min on a wall charger. Not an issue on battery.
 - USB Serial/JTAG console does not survive light sleep, and `power_enter_deep_sleep()` shuts it down deliberately. For power debugging, switch the console to UART0 (IO43/IO44).
-- Standby current is still above the ~388 µA the vendor demo reports for this board. Long-term measurement pending; see 8.
 
 ## 8. Standby current
 
-Deep sleep on this board is widely reported as drawing milliamps instead of microamps — see [LilyGo-EPD47 issue #144](https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/issues/144). This firmware started at roughly 10 mA and now measures around 1.2 mA, estimated from battery percentage over ten-hour intervals.
+Deep sleep on this board is widely reported as drawing milliamps instead of microamps — see [LilyGo-EPD47 issue #144](https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/issues/144). Measured on a T5-4.7-**S3 rev V2.4** (capacitive touch); the non-touch V2.3 has no GT911 and is unaffected by this particular cause. This firmware started at roughly 10 mA and now draws under 0.4 mA — no measurable drop over 29 hours at the 1% resolution of the battery gauge. Figures are estimated from charge percentage on a 1200 mAh cell; an ammeter would give a tighter number.
 
 **The cause was the touch controller never entering sleep.** The Goodix programming guide requires INT to be driven low before the sleep command; the reference driver does not do this, so the controller ignores the command and keeps scanning. The I2C write reports success either way, which is why it goes unnoticed.
 
@@ -467,15 +482,24 @@ Verified directly — touch samples registered over ten seconds after each step:
 
 This also explains why light and deep sleep measured the same before the fix: the controller was awake in both, and its draw swamped the difference.
 
+A second, smaller source was the PCF8563 CLKOUT pin, which emits a 32.768 kHz square wave by default and never stops. Disabling it roughly halved the remaining draw — so on this board the line is evidently routed and pulled up. See `RTC_DISABLE_CLKOUT` in 3.4.
+
+| Stage             | Current  | Runtime on 1200 mAh |
+| ----------------- | -------- | ------------------- |
+| Before            | ~10 mA   | 5 days              |
+| GT911 sleep fixed | ~1.25 mA | 40 days             |
+| + CLKOUT disabled | <0.4 mA  | 125 days            |
+
+The intermediate figure was measured over ten-hour intervals and the final one over intervals of 19 to 29 hours; the shorter window makes the middle row an upper bound rather than a precise value.
+
 Two hypotheses were tested and rejected: forcing the panel data lines low before sleep (no measurable effect, and the vendor demo does not do it), and leakage through the panel rail (the power LED confirms `epd_poweroff_all()` works).
 
-Figures here are preliminary. A multi-week measurement is in progress and this section will be updated with the final number.
+The remaining draw is comparable to the ~388 µA the vendor demo reports for this board. Measurement continues; the figure may tighten further but is already past the point of practical relevance.
 
 ## 9. Backlog
 
 - Shared `lv_style_t` objects; every `lv_obj_set_style_*` call allocates
 - Replace raw owning pointers in UI components with values or `unique_ptr`
-- Close the remaining gap to the vendor's 388 µA — `rtc_gpio_pullup_en()` on the wake pin keeps the RTC peripheral domain powered and is the next candidate
 - PCF8563 timekeeping is available but unused; see 5.6
 
 ## 10. Licenses
